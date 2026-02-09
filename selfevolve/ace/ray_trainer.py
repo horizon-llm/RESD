@@ -2,10 +2,12 @@
 ACE Trainer
 """
 
+import os
 import time
 import uuid
 from typing import Optional
 from pprint import pprint
+from copy import deepcopy
 
 import numpy as np
 import ray
@@ -31,6 +33,10 @@ from verl.utils.metric import (
 )
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.tracking import ValidationGenerationsLogger
+
+from selfevolve.ace.utils import load_initial_playbook, extract_bullet_tags, extract_answer, extract_bullet_ids
+from selfevolve.ace.prompts import GENERATOR_PROMPT, REFLECTOR_PROMPT, CURATOR_PROMPT, REFLECTOR_PROMPT_NO_GT, CURATOR_PROMPT_NO_GT
+from selfevolve.ace.playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats
 
 WorkerType = type[Worker]
 
@@ -70,6 +76,7 @@ class ACETrainer(RayPPOTrainer):
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
         self.use_critic = False
+        self.use_json_mode = config.trainer.get("use_json_mode", False)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -229,19 +236,306 @@ class ACETrainer(RayPPOTrainer):
                 reward_tensor = reward_tensor.sum(dim=-1)
             return reward_tensor, reward_extra_infos_dict
     
+    def _initialize_empty_playbook(self) -> str:
+        """Initialize an empty playbook with standard sections."""
+        return """## STRATEGIES & INSIGHTS
+
+## FORMULAS & CALCULATIONS
+
+## CODE SNIPPETS & TEMPLATES
+
+## COMMON MISTAKES TO AVOID
+
+## PROBLEM-SOLVING HEURISTICS
+
+## CONTEXT CLUES & INDICATORS
+
+## OTHERS"""
+    
     def _load_playbook(self):
-        pass
+        if self.config.trainer.resume_mode == "disable":
+            return 0
 
-    def _apply_generation_template(self, batch: DataProto) -> DataProto:
-        pass
+        playbook_folder = self.config.trainer.default_local_dir
+        if not os.path.isabs(playbook_folder):
+            working_dir = os.getcwd()
+            playbook_folder = os.path.join(working_dir, playbook_folder)
+        global_step_folder = find_latest_ckpt_path(checkpoint_folder)
 
-    def _apply_reflection_template(self, batch: DataProto) -> DataProto:
-        pass
+        # find global_step_folder
+        if self.config.trainer.resume_mode == "auto":
+            if global_step_folder is None:
+                print("Training from scratch")
+                self.playbook = self._initialize_empty_playbook()
+                return 0
+        else:
+            if self.config.trainer.resume_mode == "resume_path":
+                assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
+                assert "global_step_" in self.config.trainer.resume_from_path, (
+                    "resume ckpt must specify the global_steps"
+                )
+                global_step_folder = self.config.trainer.resume_from_path
+                if not os.path.isabs(global_step_folder):
+                    working_dir = os.getcwd()
+                    global_step_folder = os.path.join(working_dir, global_step_folder)
+        print(f"Load from checkpoint folder: {global_step_folder}")
+        # set global step
+        self.global_steps = int(global_step_folder.split("global_step_")[-1])
 
-    def _apply_curation_template(self, batch: DataProto) -> DataProto:
-        pass
+        print(f"Setting global step to {self.global_steps}")
+        print(f"Resuming from {global_step_folder}")
 
-    def _train_single_step(self, batch: DataProto):
+        self.playbook = load_initial_playbook(os.path.join(global_step_folder, "playbook.txt"))
+
+        # load dataloader,
+        # TODO: from remote not implemented yet
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        if os.path.exists(dataloader_local_path):
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state_dict)
+        else:
+            print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+    
+    def _get_gen_batch(self, batch: DataProto) -> DataProto:
+        non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+        if "multi_modal_data" in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append("multi_modal_data")
+        if "raw_prompt" in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append("raw_prompt")
+        if "tools_kwargs" in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append("tools_kwargs")
+        if "interaction_kwargs" in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append("interaction_kwargs")
+        gen_batch = batch.pop(
+            non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+        )
+        gen_batch.meta_info["global_steps"] = self.global_steps
+        return gen_batch
+
+    def _apply_generation_template(self, batch: DataProto, reflections: list = None) -> DataProto:        
+        # format prompt with playbook
+        extra_infos = batch.non_tensor_batch.get("extra_info", {})
+        questions = extra_infos.get("question", [])
+        contexts = extra_infos.get("context", [])
+
+        generator_prompts = []
+        for question, context, reflection in zip(questions, contexts, reflections or ["(empty)"] * len(questions)):
+            generator_prompts.append(GENERATOR_PROMPT.format(
+                self.playbook, reflection, question, context
+            ))
+        generator_messages = [[{"role": "user", "content": prompt}] for prompt in generator_prompts]
+        new_batch = deepcopy(batch)
+        new_batch.non_tensor_batch["raw_prompt"] = np.array(generator_messages, dtype=object)
+        return new_batch
+    
+    def _apply_reflection_template(self, batch: DataProto, no_ground_truth: bool = False) -> DataProto:
+        extra_infos = batch.non_tensor_batch.get("extra_info", {})
+        questions = extra_infos.get("question", [])
+        targets = extra_infos.get("target", []) if not no_ground_truth else None
+        responses = extra_infos.get("generation", [])
+        predicted_answers = extra_infos.get("extracted_answer", [])
+        environment_feedbacks = extra_infos.get("environment_feedback", ["Predicted answer does not match ground truth."] * len(questions))
+        bullet_ids = extra_infos.get("bullet_id", [])
+
+        # Get bullets for reflector
+        playbook_bullets = extract_playbook_bullets(
+            self.playbook, bullet_ids
+        )
+        
+        reflector_prompts = []
+        for question, target, response, predicted_answer, feedback, bullets in zip(questions, targets, responses, predicted_answers, environment_feedbacks, playbook_bullets):
+            if no_ground_truth:
+                prompt = REFLECTOR_PROMPT_NO_GT.format(
+                    question,
+                    response,
+                    predicted_answer,
+                    feedback,
+                    bullets,
+                )
+            else:
+                prompt = REFLECTOR_PROMPT.format(
+                    question,
+                    response,
+                    predicted_answer,
+                    target,
+                    feedback,
+                    bullets,
+                )
+            reflector_prompts.append(prompt)
+        reflector_messages = [[{"role": "user", "content": prompt}] for prompt in reflector_prompts]
+        new_batch = deepcopy(batch)
+        new_batch.non_tensor_batch["raw_prompt"] = np.array(reflector_messages, dtype=object)
+        return new_batch
+
+    def _apply_curation_template(self, batch: DataProto, no_ground_truth: bool = False) -> DataProto:
+        extra_infos = batch.non_tensor_batch.get("extra_info", {})
+
+        playbook_stats = get_playbook_stats(self.playbook)
+
+        recent_reflection = extra_infos['reflection_results'][-1]['reflection']
+        context = extra_infos['context'][-1] # only need the context, not the sample
+        total_playbook_token_budget = self.config.trainer.get("total_playbook_token_budget", 80000)
+        
+        if no_ground_truth:
+            curation_prompt = CURATOR_PROMPT_NO_GT.format(
+                recent_reflection=recent_reflection,
+                context=context,
+                playbook_stats=playbook_stats,
+                total_playbook_token_budget=total_playbook_token_budget,
+            )
+        else:
+            curation_prompt = CURATOR_PROMPT.format(
+                recent_reflection=recent_reflection,
+                context=context,
+                playbook_stats=playbook_stats,
+                total_playbook_token_budget=total_playbook_token_budget,
+            )
+        
+        curation_messages = [[{"role": "user", "content": curation_prompt}]] * len(batch.batch)
+        # copy the batch
+        new_batch = deepcopy(batch)
+
+        new_batch.non_tensor_batch["raw_prompt"] = np.array(curation_messages, dtype=object)
+        return new_batch
+    
+    def _curate(self, batch: DataProto) -> DataProto:
+        gen_batch = self._apply_curation_template(batch)
+        gen_outputs = self.rollout_wg.generate_sequences(gen_batch)
+        for data_item in gen_outputs:
+            # decode responses
+            prompt_ids = data_item.batch["prompts"]
+            prompt_length = prompt_ids.shape[-1]
+
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            curation_response = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+            # Check for empty response error
+            if curation_response.startswith("INCORRECT_DUE_TO_EMPTY_RESPONSE"):
+                print(f"⏭️  Skipping curator operation due to empty response")
+                return current_playbook
+
+    def _iterative_reflection(self, batch: DataProto) -> DataProto:
+        max_num_rounds = self.config.trainer.get("max_reflection_rounds", 3)
+        batch_size = len(batch.batch)
+
+        # Track which samples are still incorrect using original indices
+        active_indices = torch.arange(batch_size)
+        # Clone the batch so we can write back results per-round
+        result_batch = batch
+
+        # save results in each round
+        reflect_results = [[]] * batch_size
+
+        for round_num in range(max_num_rounds):
+            if len(active_indices) == 0:
+                break  # All samples resolved
+
+            # Subset to only the still-incorrect samples
+            active_mask = torch.zeros(batch_size, dtype=torch.bool)
+            active_mask[active_indices] = True
+            active_batch = batch[active_mask]
+
+            # Reflect on incorrect samples
+            gen_batch = self._apply_reflection_template(active_batch)
+            gen_outputs = self.rollout_wg.generate_sequences(gen_batch)
+
+            batch_reflections = []
+            batch_bullet_tags = []
+            for data_item in gen_outputs:
+                # decode responses
+                prompt_ids = data_item.batch["prompts"]
+                prompt_length = prompt_ids.shape[-1]
+
+                response_ids = data_item.batch["responses"]
+                valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+                valid_response_ids = response_ids[:valid_response_length]
+
+                reflection = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+                batch_reflections.append(reflection)
+
+                # extract bullet tags
+                bullet_tags = extract_bullet_tags(reflection, use_json_mode=self.use_json_mode)
+                batch_bullet_tags.append(bullet_tags)
+
+                if bullet_tags:
+                    self.playbook = update_bullet_counts(self.playbook, bullet_tags)
+
+            # Regenerate with reflection
+            gen_batch = self._generate(active_batch, reflections=batch_reflections)
+
+            # Check correctness
+            reward_tensor, reward_extra_infos_dict = self._compute_reward_legacy(
+                gen_batch, reward_fn=self.reward_fn, reward_for_val=False
+            )
+            is_correct = reward_extra_infos_dict["acc"]
+
+            # Write back results for all active samples into result_batch
+            for key in gen_batch.batch.keys():
+                result_batch.batch[key][active_indices] = gen_batch.batch[key]
+            active_indices_np = active_indices.numpy()
+            for key in gen_batch.non_tensor_batch.keys():
+                result_batch.non_tensor_batch[key][active_indices_np] = gen_batch.non_tensor_batch[key]
+            
+            for idx, reflection in zip(active_indices, batch_reflections):
+                reflect_results[idx] = {
+                    "round": round_num,
+                    "reflection": reflection,
+                    "bullet_tags": batch_bullet_tags[idx],
+                    "gen_result": gen_batch.non_tensor_batch["extra_info"]["gen_results"][idx]
+                }
+
+            # Remove newly correct samples from the active set
+            if is_correct is not None:
+                # is_correct is a bool tensor over the active subset
+                still_incorrect = ~is_correct
+                active_indices = active_indices[still_incorrect]
+        
+        result_batch.non_tensor_batch['extra_info']['reflection_results'] = np.array(reflect_results, dtype=object)
+
+        return result_batch
+    
+    def _generate(self, batch: DataProto, reflections: list = None) -> DataProto:
+        gen_batch = self._apply_generation_template(batch, reflections=reflections)
+        gen_outputs = self.rollout_wg.generate_sequences(gen_batch)
+        gen_batch = gen_batch.union(gen_outputs)
+
+        all_responses = []
+        all_bullet_ids = []
+        all_extracted_answers = []
+        for data_item in gen_outputs:
+            # decode responses
+            prompt_ids = data_item.batch["prompts"]
+            prompt_length = prompt_ids.shape[-1]
+
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            all_responses.append(response_str)
+
+            # extract bullet ids
+            bullet_ids = extract_bullet_ids(response_str, use_json_mode=self.use_json_mode)
+            all_bullet_ids.append(bullet_ids)
+
+            # Extract answer
+            extracted_answer = extract_answer(response_str, use_json_mode=self.use_json_mode)
+            all_extracted_answers.append(extracted_answer)
+        
+        gen_results = []
+        for response, bullet_ids, extracted_answer in zip(all_responses, all_bullet_ids, all_extracted_answers):
+            gen_results.append({
+                "response": response,
+                "bullet_id": bullet_ids,
+                "extracted_answer": extracted_answer,
+            })
+        gen_batch.non_tensor_batch["extra_info"]["gen_results"] = gen_results
+        return gen_batch
+
+    def _train_single_batch(self, batch: DataProto):
         """
         Train a single step of ACE, the original implementation can only take one sample at a time. Here we modify it to support batch training.
 
@@ -252,9 +546,7 @@ class ACETrainer(RayPPOTrainer):
             dict: A dictionary containing the metrics for the training step.
         """
         # STEP 1: Initial generation (pre-train)
-        gen_batch = self._apply_generation_template(batch)
-        gen_outputs = self.rollout_wg.generate_sequences(gen_batch)
-        gen_batch = gen_batch.union(gen_outputs)
+        gen_batch = self._generate(batch)
 
         # Extract answer and check correctness
         reward_tensor, reward_extra_infos_dict = self._compute_reward_legacy(
@@ -264,10 +556,41 @@ class ACETrainer(RayPPOTrainer):
         pre_train_answer = reward_extra_infos_dict.get("pred", None)
 
         # STEP 2: Reflection and regeneration
-        reflection_content = "(empty)"
-
         # select incorrect samples for reflection
         incorrect_mask = ~is_correct if is_correct is not None else torch.zeros(len(batch.batch), dtype=torch.bool)
+        incorrect_indices = torch.where(incorrect_mask)[0]
+        if incorrect_mask.any():
+            incorrect_batch = gen_batch[incorrect_mask]
+            reflected_batch = self._iterative_reflection(incorrect_batch)
+
+            for key in reflected_batch.batch.keys():
+                gen_batch.batch[key][incorrect_mask] = reflected_batch.batch[key]
+            
+            incorrect_indices_np = incorrect_indices.numpy()
+            for key in reflected_batch.non_tensor_batch.keys():
+                gen_batch.non_tensor_batch[key][incorrect_indices_np] = reflected_batch.non_tensor_batch[key]
+        else:
+            # For correct answers - still run reflector to tag helpful bullets
+            correct_batch = gen_batch[~incorrect_mask]
+
+            correct_batch = self._apply_reflection_template(correct_batch)
+            reflect_outputs = self.rollout_wg.generate_sequences(correct_batch)
+            correct_batch = correct_batch.union(reflect_outputs)
+
+            reflections = self.tokenizer.batch_decode(correct_batch.batch['responses'], skip_special_tokens=True)
+            bullet_tags = extract_bullet_tags(reflections, use_json_mode=self.use_json_mode)
+
+            if bullet_tags:
+                self.playbook = update_bullet_counts(self.playbook, bullet_tags)
+        
+        # STEP 3: Curator - Periodically update playbook
+        if self.global_steps % self.config.trainer.curation_interval == 0:
+            print(f"\n--- Running Curator at step {self.global_steps} ---")
+
+            self._curate(gen_batch)
+        
+        # STEP 4: Post-curator generation
+        gen_batch = self._generate(gen_batch)
     
     def fit(self):
         """
@@ -342,5 +665,4 @@ class ACETrainer(RayPPOTrainer):
 
                 gen_batch = self._get_gen_batch(batch)
 
-                # pass global_steps to trace
-                gen_batch.meta_info["global_steps"] = self.global_steps
+                self._train_single_batch(gen_batch)
