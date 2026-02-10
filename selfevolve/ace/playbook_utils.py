@@ -8,7 +8,7 @@ This file contains functions for parsing and manipulating the playbook.
 """
 import json
 import re
-from .utils import get_section_slug
+from selfevolve.ace.utils import get_section_slug
 
 def parse_playbook_line(line):
     """Parse a single playbook line to extract components"""
