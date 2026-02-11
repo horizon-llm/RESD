@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 
+########################### Quick Config ###########################
+
+MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507
+MODEL_SLUG=qwen3-30b-a3b-thinking-2507
+BATCH_SIZE=${BATCH_SIZE:-32} # controls update frequency
+BATCH_WORKERS=${BATCH_WORKERS:-16} # controls concurrency
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+NUM_EPOCHS=${NUM_EPOCHS:-3}
+EVAL_STEPS=${EVAL_STEPS:-4} # number of batches between evaluations
+
 PYTHON="$CONDA_PREFIX/bin/python"
 echo "Using Python: $("$PYTHON" -c 'import sys; print(sys.executable)')"
 
+########################### Start Servers ###########################
+
 nohup "$PYTHON" -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3-30B-A3B-Thinking-2507 \
+    --model $MODEL \
     --max-model-len 131072 \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
@@ -15,7 +27,6 @@ VLLM_PID=$!
 # Set up trap to kill the server processes on script exit (normal or error)
 trap "pkill -P $VLLM_PID 2>/dev/null; kill $VLLM_PID 2>/dev/null || true" EXIT
 
-# ==== start servers ==== #
 wait_for_servers() {
     local urls=("$@")
     local max_wait=${MAX_WAIT:-3000}  # Default 50 minutes
@@ -50,24 +61,27 @@ wait_for_servers() {
 
 wait_for_servers "http://localhost:8000/v1/models"
 
-# ==== sync results to S3 in the background ==== #
+########################### Sync Results ###########################
+
 nohup bash scripts/sync_ace_results.sh --interval 600 --verbose >"sync_s3.out" 2>&1 | tee sync_s3.out &
 SYNC_PID=$!
 # Set up trap to kill the sync process on script exit (normal or error)
 trap "echo 'Killing sync process (PID: $SYNC_PID)...'; kill $SYNC_PID 2>/dev/null || true" EXIT
-# ==== sync results to S3 in the background ==== #
 
+########################### Run ACE ###########################
+
+result_dir="results_${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESPONSE_LENGTH}"
 "$PYTHON" -m selfevolve.ace.run \
     --task_name finer \
     --mode offline \
-    --save_path results \
-    --num_epochs 3 \
-    --eval_steps 100 \
-    --max_tokens 8192 \
+    --save_path $result_dir \
+    --num_epochs $NUM_EPOCHS \
+    --eval_steps $EVAL_STEPS \
+    --max_tokens $MAX_RESPONSE_LENGTH \
     --api_provider vllm \
-    --generator_model Qwen/Qwen3-30B-A3B-Thinking-2507 \
-    --reflector_model Qwen/Qwen3-30B-A3B-Thinking-2507 \
-    --curator_model Qwen/Qwen3-30B-A3B-Thinking-2507 \
+    --generator_model $MODEL \
+    --reflector_model $MODEL \
+    --curator_model $MODEL \
     --batch_mode \
-    --batch_size 32 \
-    --batch_workers 32
+    --batch_size $BATCH_SIZE \
+    --batch_workers $BATCH_WORKERS \

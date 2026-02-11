@@ -18,7 +18,8 @@ try:
     from megatron.bridge.models.conversion.param_mapping import AutoMapping
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
     from megatron.bridge.peft.dora import DoRA
-    from megatron.bridge.peft.lora import LoRA, VLMLoRA
+    # from megatron.bridge.peft.lora import LoRA
+    from megatron.bridge.peft.lora import LoRA, VLMLoRA # VLMLoRA will trigger error
 except ImportError:
     # `pip install verl[mcore]` or
     print("Megatron-Bridge package not found. Please install Megatron-Bridge with `pip install megatron-bridge`")

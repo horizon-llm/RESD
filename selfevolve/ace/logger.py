@@ -9,7 +9,7 @@ This file contains functions for logging various events and information during t
 import os
 import json
 from datetime import datetime
-from .playbook_utils import parse_playbook_line
+from selfevolve.ace.playbook_utils import parse_playbook_line
 
 
 def log_llm_call(log_dir, call_info):

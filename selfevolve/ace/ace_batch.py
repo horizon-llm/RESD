@@ -33,12 +33,12 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .ace import ACE
-from .playbook_utils import (
+from selfevolve.ace import ACE
+from selfevolve.ace.playbook_utils import (
     extract_playbook_bullets, update_bullet_counts, get_playbook_stats
 )
-from .logger import log_bullet_usage
-from .utils import extract_answer, count_tokens, evaluate_test_set
+from selfevolve.ace.logger import log_bullet_usage
+from selfevolve.ace.utils import extract_answer, count_tokens, evaluate_test_set
 
 
 class ACEBatch(ACE):
@@ -100,7 +100,7 @@ class ACEBatch(ACE):
         self,
         train_samples: List[Dict[str, Any]],
         val_samples: List[Dict[str, Any]],
-        data_processor,
+        data_processor: "selfevolve.ace.data_processor.DataProcessor",
         config: Dict[str, Any],
         save_path: str,
         usage_log_path: str,
@@ -137,7 +137,7 @@ class ACEBatch(ACE):
         print(f"Train samples per epoch: {len(train_samples)}")
         print(f"Val samples: {len(val_samples)}")
         print(f"Curator frequency: every {curator_frequency} steps")
-        print(f"Evaluation frequency: every {eval_steps} steps")
+        print(f"Evaluation frequency: every {eval_steps} batches")
         print(f"Batch size: {self.batch_size}")
         print(f"Batch workers: {self.batch_workers}\n")
 
@@ -153,6 +153,7 @@ class ACEBatch(ACE):
             epoch_targets_post_train = []
 
             # Process in batches
+            batch_counter = 0
             for batch_start in range(0, len(train_samples), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(train_samples))
                 batch = train_samples[batch_start:batch_end]
@@ -198,6 +199,13 @@ class ACEBatch(ACE):
                     }
                     pre_train_post_train_results.append(pre_train_post_train_result)
 
+                # Save pre_train_post_train_results incrementally
+                pre_train_post_train_results_path = os.path.join(
+                    save_path, "pre_train_post_train_results.json"
+                )
+                with open(pre_train_post_train_results_path, "w") as f:
+                    json.dump(pre_train_post_train_results, f, indent=2)
+
                 # Save intermediate playbook at checkpoint steps within this batch
                 for step in batch_steps:
                     if step % save_steps == 0:
@@ -207,15 +215,11 @@ class ACEBatch(ACE):
                         with open(intermediate_path, "w") as f:
                             f.write(self.playbook)
 
-                # Periodic evaluation - use the last eval checkpoint in this batch
-                eval_checkpoint = None
-                for step in batch_steps:
-                    if step % eval_steps == 0:
-                        eval_checkpoint = step
-
-                if eval_checkpoint is not None:
+                # Periodic evaluation based on accumulated batch count
+                batch_counter += 1
+                if batch_counter % eval_steps == 0:
                     print(f"\n{'='*40}")
-                    print(f"EVALUATION AT EPOCH {epoch}, STEP {eval_checkpoint}")
+                    print(f"EVALUATION AT EPOCH {epoch}, BATCH {batch_counter} (STEP {batch_steps[-1]})")
                     print(f"{'='*40}")
 
                     # Compute training accuracies
@@ -238,12 +242,19 @@ class ACEBatch(ACE):
                         )
                         val_time = time.perf_counter() - t0
 
+                    # Count unparsable generations
+                    pre_train_unparsable = sum(1 for a in epoch_answers_pre_train if a == "No final answer found")
+                    post_train_unparsable = sum(1 for a in epoch_answers_post_train if a == "No final answer found")
+
                     result = {
                         "epoch": epoch,
-                        "step": eval_checkpoint,
+                        "batch": batch_counter,
+                        "step": batch_steps[-1],
                         "train_result": {
                             "pre_train_accuracy": pre_train_accuracy,
-                            "post_train_accuracy": post_train_accuracy
+                            "post_train_accuracy": post_train_accuracy,
+                            "pre_train_unparsable": pre_train_unparsable,
+                            "post_train_unparsable": post_train_unparsable
                         },
                         "val_result": val_results,
                         "playbook_num_tokens": count_tokens(self.playbook),
@@ -254,7 +265,8 @@ class ACEBatch(ACE):
                     results.append(result)
                     error_logs.append({
                         "epoch": epoch,
-                        "step": eval_checkpoint,
+                        "batch": batch_counter,
+                        "step": batch_steps[-1],
                         "val_results": val_results,
                         "error_log": val_error_log
                     })

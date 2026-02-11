@@ -10,7 +10,7 @@ import time
 import random
 from datetime import datetime
 import openai
-from .logger import log_llm_call, log_problematic_request
+from selfevolve.ace.logger import log_llm_call, log_problematic_request
 
 def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_tokens=4096, log_dir=None,
                    sleep_seconds=15, retries_on_timeout=1000, attempt=1, use_json_mode=False):
@@ -103,6 +103,7 @@ def timed_llm_call(client, api_provider, model, prompt, role, call_id, max_token
                 "response_length": len(response_content),
                 "prompt_num_tokens": response.usage.prompt_tokens,
                 "response_num_tokens": response.usage.completion_tokens,
+                "finish_reason": response.choices[0].finish_reason,
             }
             
             print(f"[{role.upper()}] Call {call_id} completed in {total_time:.2f}s")

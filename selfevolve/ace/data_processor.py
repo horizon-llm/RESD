@@ -1,6 +1,6 @@
 import os
 import json
-from .utils import extract_answer
+from selfevolve.ace.utils import extract_answer
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

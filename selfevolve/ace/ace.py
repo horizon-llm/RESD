@@ -13,10 +13,10 @@ import json
 import time
 from typing import Dict, List, Tuple, Optional, Any
 
-from .core import Generator, Reflector, Curator, BulletpointAnalyzer
-from .playbook_utils import *
-from .logger import *
-from .utils import *
+from selfevolve.ace.core import Generator, Reflector, Curator, BulletpointAnalyzer
+from selfevolve.ace.playbook_utils import *
+from selfevolve.ace.logger import *
+from selfevolve.ace.utils import *
 
 
 class ACE:
@@ -134,6 +134,35 @@ class ACE:
             'bulletpoint_analyzer_threshold': config.get('bulletpoint_analyzer_threshold', 0.90)
         }
     
+    def _setup_paths(self, save_dir: str, task_name: str, mode: str) -> Tuple[str, str]:
+        """
+        Setup logging paths and directories.
+        
+        Args:
+            save_dir: Base path for saving results
+            task_name: task name
+            mode: 'offline', 'online', or 'eval_only'
+            
+        Returns:
+            Tuple of (usage_log_path, playbook_dir)
+        """
+        # Create timestamped run folder
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_folder = f"ace_run_{timestamp}_{task_name}_{mode}"
+        save_path = os.path.join(save_dir, run_folder)
+        os.makedirs(save_path, exist_ok=True)
+        log_dir = os.path.join(save_path, "detailed_llm_logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        if mode == "eval_only":
+            return save_path, log_dir
+
+        usage_log_path = os.path.join(save_path, "bullet_usage_log.jsonl")
+        playbook_dir = os.path.join(save_path, "intermediate_playbooks")
+        os.makedirs(playbook_dir, exist_ok=True)
+        
+        return save_path, usage_log_path, playbook_dir, log_dir
+    
     def run(
         self,
         mode: str,
@@ -177,11 +206,11 @@ class ACE:
         
         # Setup paths based on mode
         if mode == 'eval_only':
-            save_path, log_dir = setup_paths(save_dir, task_name, mode, self.generator.model)
+            save_path, log_dir = self._setup_paths(save_dir, task_name, mode)
             usage_log_path = None
             playbook_dir = None
         else:
-            save_path, usage_log_path, playbook_dir, log_dir = setup_paths(save_dir, task_name, mode, self.generator.model)
+            save_path, usage_log_path, playbook_dir, log_dir = self._setup_paths(save_dir, task_name, mode)
         
         # Save configuration
         config_path = os.path.join(save_path, "run_config.json")
@@ -694,7 +723,12 @@ class ACE:
                     **tracking_dict
                 }
                 pre_train_post_train_results.append(pre_train_post_train_result)
-                
+
+                # Save pre_train_post_train_results incrementally
+                pre_train_post_train_results_path = os.path.join(save_path, "pre_train_post_train_results.json")
+                with open(pre_train_post_train_results_path, "w") as f:
+                    json.dump(pre_train_post_train_results, f, indent=2)
+
                 # Save intermediate playbook
                 if step % save_steps == 0:
                     intermediate_path = os.path.join(
@@ -726,12 +760,18 @@ class ACE:
                             max_workers=test_workers, use_json_mode=use_json_mode
                         )
                     
+                    # Count unparsable generations
+                    pre_train_unparsable = sum(1 for a in epoch_answers_pre_train if a == "No final answer found")
+                    post_train_unparsable = sum(1 for a in epoch_answers_post_train if a == "No final answer found")
+
                     result = {
                         "epoch": epoch,
                         "step": step,
                         "train_result": {
                             "pre_train_accuracy": pre_train_accuracy,
-                            "post_train_accuracy": post_train_accuracy
+                            "post_train_accuracy": post_train_accuracy,
+                            "pre_train_unparsable": pre_train_unparsable,
+                            "post_train_unparsable": post_train_unparsable
                         },
                         "val_result": val_results,
                         "playbook_num_tokens": count_tokens(self.playbook),
@@ -1013,7 +1053,12 @@ class ACE:
                     **tracking_dict
                 }
                 pre_train_post_train_results.append(pre_train_post_train_result)
-                
+
+                # Save pre_train_post_train_results incrementally
+                pre_train_post_train_results_path = os.path.join(save_path, "pre_train_post_train_results.json")
+                with open(pre_train_post_train_results_path, "w") as f:
+                    json.dump(pre_train_post_train_results, f, indent=2)
+
                 # Save intermediate playbook
                 if global_step % save_steps == 0:
                     intermediate_path = os.path.join(
@@ -1030,12 +1075,18 @@ class ACE:
                 epoch_answers_post_train, epoch_targets_post_train
             )
             
+            # Count unparsable generations
+            pre_train_unparsable = sum(1 for a in epoch_answers_pre_train if a == "No final answer found")
+            post_train_unparsable = sum(1 for a in epoch_answers_post_train if a == "No final answer found")
+
             window_train_result = {
                 "window": window_idx + 1,
                 "global_step": global_step,
                 "train_result": {
                     "pre_train_accuracy": pre_train_accuracy,
-                    "post_train_accuracy": post_train_accuracy
+                    "post_train_accuracy": post_train_accuracy,
+                    "pre_train_unparsable": pre_train_unparsable,
+                    "post_train_unparsable": post_train_unparsable
                 },
                 "cumulative_test_accuracy": cumulative_test_accuracy,
                 "playbook_num_tokens": count_tokens(self.playbook),
