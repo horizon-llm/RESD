@@ -82,3 +82,36 @@ def compute_score(solution_str, ground_truth, format_score=0.0, score=1.0, **kwa
             return score
         else:
             return format_score
+
+def compute_score_count(solution_str, ground_truth, format_score=0.0, score=1.0, **kwargs):
+    """Reward function for FiNER XBRL tagging task.
+
+    Supports partial credit: if the model gets 3 out of 4 tags right,
+    score is 0.75 * score.
+
+    Args:
+        solution_str: the model's full output text
+        ground_truth: dict with key "target" containing ground truth tags
+        format_score: score when format is correct but answer is wrong
+        score: maximum score for a fully correct answer
+    """
+    answer = extract_solution(solution_str)
+    do_print = random.randint(1, 64) == 1
+
+    if do_print:
+        print("--------------------------------")
+        print(f"Golden answers: {ground_truth}")
+        if answer is not None:
+            print(f"Extracted answer: {answer}")
+        else:
+            print("Extracted answer: None!")
+        print(f"Solution string: {solution_str}")
+
+    if answer is None:
+        return 0
+    else:
+        tag_score = finer_tag_score(answer, ground_truth)
+        if tag_score == 1.0:
+            return score
+        else:
+            return format_score + tag_score * score

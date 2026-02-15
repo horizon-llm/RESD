@@ -13,7 +13,7 @@
 #
 set -euo pipefail
 
-DEFAULT_S3="s3://shopqa-users/yuwzhan/ace/results"
+DEFAULT_S3="s3://shopqa-users/yuwzhan/iterative-opd/results"
 
 INTERVAL="${INTERVAL:-600}"
 CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-./results}"

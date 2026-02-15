@@ -26,7 +26,7 @@ ETP=${ETP:-1}
 LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
@@ -34,7 +34,7 @@ ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 
 rollout_name="vllm"
 project_name='grpo_finer'
-exp_name="qwen3_30b_a3b_megatron_lora_r${LORA_RANK}_a${LORA_ALPHA}_bs${TRAIN_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_ep${NUM_EPOCHS}"
+exp_name="qwen3_30b_a3b_megatron_lora_r${LORA_RANK}_a${LORA_ALPHA}_bs${TRAIN_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_ep${NUM_EPOCHS}_reward_count"
 adv_estimator=grpo
 
 python -m selfevolve.grpo.prepare_finer_dataset \
@@ -94,7 +94,7 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     custom_reward_function.path=selfevolve/grpo/reward_score/finer.py
-    custom_reward_function.name=compute_score
+    custom_reward_function.name=compute_score_count
 )
 
 MODEL=(
@@ -142,7 +142,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.name=${rollout_name}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.25
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
     actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
@@ -174,7 +174,7 @@ TRAINER=(
     trainer.save_freq=4
     trainer.test_freq=4
     trainer.total_epochs=${NUM_EPOCHS}
-    trainer.val_before_train=False
+    trainer.val_before_train=True
 )
 
 ########################### Launch ###########################

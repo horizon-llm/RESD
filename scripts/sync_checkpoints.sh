@@ -16,7 +16,7 @@ set -euo pipefail
 export AWS_DEFAULT_PROFILE=greenland
 export AWS_DEFAULT_REGION=us-east-1
 
-DEFAULT_S3="s3://shopqa-users/yuwzhan/verl-agent-latest/checkpoints"
+DEFAULT_S3="s3://shopqa-users/yuwzhan/iterative-opd/checkpoints"
 
 INTERVAL="${INTERVAL:-600}"
 CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-./checkpoints}"

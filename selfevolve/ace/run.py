@@ -86,10 +86,18 @@ def parse_args():
                         help="Number of parallel worker threads per batch "
                              "(only used with --batch_mode)")
 
+    # Wandb configuration
+    parser.add_argument("--wandb_project", type=str, default=None,
+                        help="Wandb project name. If set, enables wandb logging")
+    parser.add_argument("--wandb_run_name", type=str, default=None,
+                        help="Wandb run name (optional, auto-generated if not set)")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="Wandb entity/team name (optional)")
+
     # Output configuration
     parser.add_argument("--save_path", type=str, required=True,
                         help="Directory to save results")
-    
+
     return parser.parse_args()
 
 def load_data(data_path: str):
@@ -254,7 +262,10 @@ def main():
         'api_provider': args.api_provider,
         'batch_mode': args.batch_mode,
         'batch_size': args.batch_size,
-        'batch_workers': args.batch_workers
+        'batch_workers': args.batch_workers,
+        'wandb_project': args.wandb_project,
+        'wandb_run_name': args.wandb_run_name,
+        'wandb_entity': args.wandb_entity,
     }
     
     # Execute using the unified run method

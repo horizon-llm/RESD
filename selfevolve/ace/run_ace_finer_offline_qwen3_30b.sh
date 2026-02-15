@@ -5,13 +5,14 @@
 MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507
 MODEL_SLUG=qwen3-30b-a3b-thinking-2507
 BATCH_SIZE=${BATCH_SIZE:-32} # controls update frequency
-BATCH_WORKERS=${BATCH_WORKERS:-16} # controls concurrency
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+BATCH_WORKERS=${BATCH_WORKERS:-32} # controls concurrency
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 EVAL_STEPS=${EVAL_STEPS:-4} # number of batches between evaluations
 
 PYTHON="$CONDA_PREFIX/bin/python"
 echo "Using Python: $("$PYTHON" -c 'import sys; print(sys.executable)')"
+wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 ########################### Start Servers ###########################
 
@@ -70,6 +71,8 @@ trap "echo 'Killing sync process (PID: $SYNC_PID)...'; kill $SYNC_PID 2>/dev/nul
 
 ########################### Run ACE ###########################
 
+project_name='ace_finer'
+exp_name="${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESPONSE_LENGTH}"
 result_dir="results_${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESPONSE_LENGTH}"
 "$PYTHON" -m selfevolve.ace.run \
     --task_name finer \
@@ -85,3 +88,5 @@ result_dir="results_${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESP
     --batch_mode \
     --batch_size $BATCH_SIZE \
     --batch_workers $BATCH_WORKERS \
+    --wandb_project $project_name \
+    --wandb_run $exp_name

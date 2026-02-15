@@ -199,6 +199,16 @@ class ACEBatch(ACE):
                     }
                     pre_train_post_train_results.append(pre_train_post_train_result)
 
+                    # Log per-step metrics to wandb
+                    global_step = (epoch - 1) * len(train_samples) + step
+                    self._wandb_log({
+                        "train/step_pre_correct": int(result['tracking_dict']['pre_train_result']['is_correct']),
+                        "train/step_post_correct": int(result['tracking_dict']['post_train_result']['is_correct']),
+                        "playbook/num_tokens": result['tracking_dict']['post_train_result']['playbook_num_tokens'],
+                        "playbook/length": result['tracking_dict']['post_train_result']['playbook_length'],
+                        "epoch": epoch,
+                    }, step=global_step)
+
                 # Save pre_train_post_train_results incrementally
                 pre_train_post_train_results_path = os.path.join(
                     save_path, "pre_train_post_train_results.json"
@@ -278,6 +288,26 @@ class ACEBatch(ACE):
                             best_accuracy = acc
                             self.best_playbook = self.playbook
                             print(f"New best accuracy: {best_accuracy:.3f}")
+
+                    # Log evaluation metrics to wandb
+                    global_step = (epoch - 1) * len(train_samples) + batch_steps[-1]
+                    eval_log = {
+                        "eval/pre_train_accuracy": pre_train_accuracy,
+                        "eval/post_train_accuracy": post_train_accuracy,
+                        "eval/pre_train_unparsable": pre_train_unparsable,
+                        "eval/post_train_unparsable": post_train_unparsable,
+                        "eval/best_val_accuracy": best_accuracy,
+                    }
+                    if val_results:
+                        eval_log["eval/val_accuracy"] = val_results.get("accuracy", 0)
+                        eval_log["eval/val_correct"] = val_results.get("correct", 0)
+                        eval_log["eval/val_no_answer"] = val_results.get("no_answer", 0)
+                    stats = get_playbook_stats(self.playbook)
+                    eval_log["playbook/total_bullets"] = stats.get("total_bullets", 0)
+                    eval_log["playbook/high_performing"] = stats.get("high_performing", 0)
+                    eval_log["playbook/problematic"] = stats.get("problematic", 0)
+                    eval_log["playbook/unused"] = stats.get("unused", 0)
+                    self._wandb_log(eval_log, step=global_step)
 
                     # Save results
                     results_path = os.path.join(save_path, "train_results.json")

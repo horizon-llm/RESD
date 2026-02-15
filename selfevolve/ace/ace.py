@@ -13,6 +13,13 @@ import json
 import time
 from typing import Dict, List, Tuple, Optional, Any
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
+
 from selfevolve.ace.core import Generator, Reflector, Curator, BulletpointAnalyzer
 from selfevolve.ace.playbook_utils import *
 from selfevolve.ace.logger import *
@@ -91,6 +98,8 @@ class ACE:
         self.best_playbook = self.playbook
         # Track global bullet ID
         self.next_global_id = 1
+        # wandb state (initialized in run())
+        self._wandb_enabled = False
     
     def _initialize_empty_playbook(self) -> str:
         """Initialize an empty playbook with standard sections."""
@@ -108,6 +117,11 @@ class ACE:
 
 ## OTHERS"""
     
+    def _wandb_log(self, data: Dict[str, Any], step: Optional[int] = None):
+        """Log metrics to wandb if enabled."""
+        if self._wandb_enabled and wandb is not None and wandb.run is not None:
+            wandb.log(data, step=step)
+
     def _extract_config_params(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extract common configuration parameters.
@@ -223,7 +237,33 @@ class ACE:
                 "curator_model": self.curator.model,
                 "config": config,
             }, f, indent=2)
-        
+
+        # Initialize wandb if requested
+        wandb_project = config.get('wandb_project', None)
+        if wandb_project and _WANDB_AVAILABLE:
+            wandb_run_name = config.get('wandb_run_name', None)
+            wandb_entity = config.get('wandb_entity', None)
+            wandb.init(
+                project=wandb_project,
+                name=wandb_run_name,
+                entity=wandb_entity,
+                config={
+                    "task_name": task_name,
+                    "mode": mode,
+                    "generator_model": self.generator.model,
+                    "reflector_model": self.reflector.model,
+                    "curator_model": self.curator.model,
+                    **{k: v for k, v in config.items()
+                       if k not in ('wandb_project', 'wandb_run_name', 'wandb_entity')},
+                },
+                dir=save_path,
+            )
+            self._wandb_enabled = True
+            print(f"Wandb initialized: project={wandb_project}, run={wandb.run.name}")
+        elif wandb_project and not _WANDB_AVAILABLE:
+            print("Warning: wandb_project set but wandb is not installed. "
+                  "Install with: pip install wandb")
+
         # Print initial banner
         print(f"\n{'='*60}")
         print(f"ACE SYSTEM - {mode.upper().replace('_', ' ')} MODE")
@@ -348,7 +388,7 @@ class ACE:
         final_results_path = os.path.join(save_path, "final_results.json")
         with open(final_results_path, "w") as f:
             json.dump(results, f, indent=2)
-        
+
         # Print final summary
         print(f"\n{'='*60}")
         print(f"RUN COMPLETE")
@@ -366,7 +406,25 @@ class ACE:
             print(f"Test Accuracy: {results['test_results']['accuracy']:.3f}")
         print(f"Results saved to: {save_path}")
         print(f"{'='*60}\n")
-        
+
+        # Log final summary to wandb and finish
+        if self._wandb_enabled:
+            summary = {}
+            if mode == 'offline':
+                summary["best_val_accuracy"] = results['training_results']['best_validation_accuracy']
+                if test_samples:
+                    summary["initial_test_accuracy"] = results['initial_test_results']['accuracy']
+                    summary["final_test_accuracy"] = results['final_test_results']['accuracy']
+            elif mode == 'online':
+                summary["initial_test_accuracy"] = results['initial_test_results']['accuracy']
+                summary["final_test_accuracy"] = results['online_test_results']['accuracy']
+            else:
+                summary["test_accuracy"] = results['test_results']['accuracy']
+            for k, v in summary.items():
+                wandb.run.summary[k] = v
+            wandb.finish()
+            self._wandb_enabled = False
+
         return results
     
     def _run_test(
@@ -416,7 +474,15 @@ class ACE:
                 "test_results": test_results,
                 "error_log": test_error_log,
             }, f, indent=2)
-        
+
+        # Log to wandb
+        self._wandb_log({
+            f"{prefix}/test_accuracy": test_results.get("accuracy", 0),
+            f"{prefix}/test_correct": test_results.get("correct", 0),
+            f"{prefix}/test_total": test_results.get("total", 0),
+            f"{prefix}/test_no_answer": test_results.get("no_answer", 0),
+        })
+
         return test_results
     
     def _train_single_sample(
@@ -724,6 +790,16 @@ class ACE:
                 }
                 pre_train_post_train_results.append(pre_train_post_train_result)
 
+                # Log per-step metrics to wandb
+                global_step = (epoch - 1) * len(train_samples) + step
+                self._wandb_log({
+                    "train/step_pre_correct": int(tracking_dict["pre_train_result"]["is_correct"]),
+                    "train/step_post_correct": int(tracking_dict["post_train_result"]["is_correct"]),
+                    "playbook/num_tokens": tracking_dict["post_train_result"]["playbook_num_tokens"],
+                    "playbook/length": tracking_dict["post_train_result"]["playbook_length"],
+                    "epoch": epoch,
+                }, step=global_step)
+
                 # Save pre_train_post_train_results incrementally
                 pre_train_post_train_results_path = os.path.join(save_path, "pre_train_post_train_results.json")
                 with open(pre_train_post_train_results_path, "w") as f:
@@ -736,13 +812,13 @@ class ACE:
                     )
                     with open(intermediate_path, "w") as f:
                         f.write(self.playbook)
-                
+
                 # Periodic evaluation
                 if step % eval_steps == 0:
                     print(f"\n{'='*40}")
                     print(f"EVALUATION AT EPOCH {epoch}, STEP {step}")
                     print(f"{'='*40}")
-                    
+
                     # Compute training accuracies
                     pre_train_accuracy = data_processor.evaluate_accuracy(
                         epoch_answers_pre_train, epoch_targets_pre_train
@@ -750,16 +826,16 @@ class ACE:
                     post_train_accuracy = data_processor.evaluate_accuracy(
                         epoch_answers_post_train, epoch_targets_post_train
                     )
-                    
+
                     # Validation evaluation
                     val_results = {}
                     if val_samples:
                         val_results, val_error_log = evaluate_test_set(
-                            data_processor, self.generator, self.playbook, 
-                            val_samples, self.max_tokens, log_dir, 
+                            data_processor, self.generator, self.playbook,
+                            val_samples, self.max_tokens, log_dir,
                             max_workers=test_workers, use_json_mode=use_json_mode
                         )
-                    
+
                     # Count unparsable generations
                     pre_train_unparsable = sum(1 for a in epoch_answers_pre_train if a == "No final answer found")
                     post_train_unparsable = sum(1 for a in epoch_answers_post_train if a == "No final answer found")
@@ -793,7 +869,26 @@ class ACE:
                             best_accuracy = acc
                             self.best_playbook = self.playbook
                             print(f"🎉 New best accuracy: {best_accuracy:.3f}")
-                    
+
+                    # Log evaluation metrics to wandb
+                    eval_log = {
+                        "eval/pre_train_accuracy": pre_train_accuracy,
+                        "eval/post_train_accuracy": post_train_accuracy,
+                        "eval/pre_train_unparsable": pre_train_unparsable,
+                        "eval/post_train_unparsable": post_train_unparsable,
+                        "eval/best_val_accuracy": best_accuracy,
+                    }
+                    if val_results:
+                        eval_log["eval/val_accuracy"] = val_results.get("accuracy", 0)
+                        eval_log["eval/val_correct"] = val_results.get("correct", 0)
+                        eval_log["eval/val_no_answer"] = val_results.get("no_answer", 0)
+                    stats = get_playbook_stats(self.playbook)
+                    eval_log["playbook/total_bullets"] = stats.get("total_bullets", 0)
+                    eval_log["playbook/high_performing"] = stats.get("high_performing", 0)
+                    eval_log["playbook/problematic"] = stats.get("problematic", 0)
+                    eval_log["playbook/unused"] = stats.get("unused", 0)
+                    self._wandb_log(eval_log, step=global_step)
+
                     # Save results
                     results_path = os.path.join(save_path, "train_results.json")
                     with open(results_path, "w") as f:
@@ -1006,7 +1101,17 @@ class ACE:
             print(f"Window {window_idx + 1} test accuracy: {window_accuracy:.3f}")
             print(f"Cumulative test accuracy so far: {cumulative_test_accuracy:.3f} "
                   f"({total_count} samples)")
-            
+
+            # Log window test results to wandb
+            self._wandb_log({
+                "online/window_test_accuracy": window_accuracy,
+                "online/window_test_correct": window_correct,
+                "online/window_test_total": window_total,
+                "online/cumulative_test_accuracy": cumulative_test_accuracy,
+                "online/total_samples_tested": total_count,
+                "online/window": window_idx + 1,
+            }, step=end_idx)
+
             # =================================================================
             # STEP 2: TRAIN on window (same as offline_train)
             # =================================================================
@@ -1054,6 +1159,15 @@ class ACE:
                 }
                 pre_train_post_train_results.append(pre_train_post_train_result)
 
+                # Log per-step online training metrics to wandb
+                self._wandb_log({
+                    "online_train/step_pre_correct": int(tracking_dict["pre_train_result"]["is_correct"]),
+                    "online_train/step_post_correct": int(tracking_dict["post_train_result"]["is_correct"]),
+                    "playbook/num_tokens": tracking_dict["post_train_result"]["playbook_num_tokens"],
+                    "playbook/length": tracking_dict["post_train_result"]["playbook_length"],
+                    "online/window": window_idx + 1,
+                }, step=global_step)
+
                 # Save pre_train_post_train_results incrementally
                 pre_train_post_train_results_path = os.path.join(save_path, "pre_train_post_train_results.json")
                 with open(pre_train_post_train_results_path, "w") as f:
@@ -1066,7 +1180,7 @@ class ACE:
                     )
                     with open(intermediate_path, "w") as f:
                         f.write(self.playbook)
-            
+
             # End of window - compute training accuracies for this window
             pre_train_accuracy = data_processor.evaluate_accuracy(
                 epoch_answers_pre_train, epoch_targets_pre_train
@@ -1098,7 +1212,20 @@ class ACE:
             print(f"\nWindow {window_idx + 1} training complete:")
             print(f"  Pre-train accuracy: {pre_train_accuracy:.3f}")
             print(f"  Post-train accuracy: {post_train_accuracy:.3f}")
-            
+
+            # Log end-of-window training summary to wandb
+            stats = get_playbook_stats(self.playbook)
+            self._wandb_log({
+                "online_train/window_pre_train_accuracy": pre_train_accuracy,
+                "online_train/window_post_train_accuracy": post_train_accuracy,
+                "online_train/pre_train_unparsable": pre_train_unparsable,
+                "online_train/post_train_unparsable": post_train_unparsable,
+                "playbook/total_bullets": stats.get("total_bullets", 0),
+                "playbook/high_performing": stats.get("high_performing", 0),
+                "playbook/problematic": stats.get("problematic", 0),
+                "playbook/unused": stats.get("unused", 0),
+            }, step=global_step)
+
             # Save window playbook
             window_playbook_path = os.path.join(
                 playbook_dir, f"window_{window_idx + 1}_final_playbook.txt"
