@@ -113,8 +113,8 @@ def compute_score(solution_str: str = None, ground_truth: str = None, data_sourc
     is_correct = actions_correct and action_inputs_correct
     reward = 1.0 if is_correct else 0.0
     
-    # Check format
-    correct_format = is_correct_format(solution)
+    # Check format: actions exist, action inputs exist, and JSON was parseable
+    correct_format = bool(pred_actions) and bool(pred_action_inputs)
     
     # Build prediction string for logging
     prediction = f"Actions: {pred_actions}, Inputs: {pred_action_inputs}"
