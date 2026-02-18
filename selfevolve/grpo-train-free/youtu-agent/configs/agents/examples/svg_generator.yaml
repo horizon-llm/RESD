@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - /model/base@orchestrator_model
+  - /agents/router/force_plan@orchestrator_router  # router
+  - /agents/simple/search_agent@orchestrator_workers.SearchAgent
+  - /agents/simple/svg_generator@orchestrator_workers.SVGGenerator
+  - _self_
+
+type: orchestrator
+
+orchestrator_config:
+  name: SVGGeneratorAgent
+  add_chitchat_subagent: false
+  additional_instructions: |-
+    Your ultimate object is generating SVG code according to user's request. So,
+    - If user's request is not clear enough, use the ChitchatAgent to help clarify user's request. (If available)
+    - Once the user's intention is clear, use the SearchAgent to gather necessary information if needed.
+    - Finally, use the SVGGeneratorAgent to generate SVG to show the result according to the report from SearchAgent.
+
+orchestrator_workers_info:
+  - name: SearchAgent
+    description: Search for useful information from the web.
+  - name: SVGGenerator
+    description: Create an SVG card to show the research result to the user.

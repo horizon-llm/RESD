@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - /tools/bash@toolkits.BashTool
+  - /tools/python_executor@toolkits.python_executor
+  - /tools/file_edit@toolkits.file_edit
+  - _self_
+
+agent:
+  name: TestAgent
+  instructions: You are a helpful assistant.
+
+env:
+  name: shell_local
+context_manager:
+  name: env
+
+enabled_skills:
+  - pptx
