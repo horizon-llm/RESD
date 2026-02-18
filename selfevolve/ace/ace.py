@@ -163,7 +163,7 @@ class ACE:
         # Create timestamped run folder
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_folder = f"ace_run_{timestamp}_{task_name}_{mode}"
-        save_path = os.path.join(save_dir, run_folder)
+        save_path = os.path.join("results", save_dir, run_folder)
         os.makedirs(save_path, exist_ok=True)
         log_dir = os.path.join(save_path, "detailed_llm_logs")
         os.makedirs(log_dir, exist_ok=True)
@@ -812,6 +812,13 @@ class ACE:
                     )
                     with open(intermediate_path, "w") as f:
                         f.write(self.playbook)
+                    if self._wandb_enabled and wandb is not None:
+                        self._wandb_log({
+                            "playbook/text": wandb.Table(
+                                data=[[self.playbook]],
+                                columns=["content"]
+                            )
+                        }, step=global_step)
 
                 # Periodic evaluation
                 if step % eval_steps == 0:
@@ -1180,6 +1187,13 @@ class ACE:
                     )
                     with open(intermediate_path, "w") as f:
                         f.write(self.playbook)
+                    if self._wandb_enabled and wandb is not None:
+                        self._wandb_log({
+                            "playbook/text": wandb.Table(
+                                data=[[self.playbook]],
+                                columns=["content"]
+                            )
+                        }, step=global_step)
 
             # End of window - compute training accuracies for this window
             pre_train_accuracy = data_processor.evaluate_accuracy(

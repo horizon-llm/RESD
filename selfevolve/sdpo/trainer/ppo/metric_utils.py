@@ -596,6 +596,10 @@ def process_validation_metrics(
                 # skip empty or string values
                 if not var_vals or isinstance(var_vals[0], str):
                     continue
+                # filter out None values
+                var_vals = [v for v in var_vals if v is not None]
+                if not var_vals:
+                    continue
 
                 # compute mean and std
                 n_resps = len(var_vals)

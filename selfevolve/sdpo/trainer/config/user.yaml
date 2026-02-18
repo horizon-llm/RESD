@@ -12,9 +12,9 @@ data:
   filter_overlong_prompts: True
   max_prompt_length: 2048
   max_response_length: 8192
-  shuffle: True
+  shuffle: False
   trust_remote_code: True
-  apply_chat_template_kwargs: {"enable_thinking": false}
+  apply_chat_template_kwargs: {"enable_thinking": True}
 
 actor_rollout_ref:
   actor:
@@ -62,4 +62,4 @@ trainer:
   test_freq: 5
   max_actor_ckpt_to_keep: 1
   total_epochs: 30
-  default_local_dir: ${vars.ckpt_dir}/${trainer.experiment_name}  # experiment_name needs to be a unique identifier
+  default_local_dir: ${vars.ckpt_dir}/${trainer.project_name}/${trainer.experiment_name}  # experiment_name needs to be a unique identifier

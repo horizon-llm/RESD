@@ -52,19 +52,21 @@ finer_val_path=data/finer/val.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
 TRAIN_BATCH_SIZE=32
-ROLLOUT_BATCH_SIZE=8
-LR=1e-5
-LAMBDA=0.0
-CLIP_ADV_HIGH=null
-DONTS_REPROMPT_ON_SELF_SUCCESS=True
-ALPHA=0.5
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
+LR=${LR:-1e-5}
+LAMBDA=${LAMBDA:-0.0}
+CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
+DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
+ALPHA=${ALPHA:-0.5}
+EMA_WEIGHT=${EMA_WEIGHT:-0.05}
 TASK=finer
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
+CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-False}
 
 project_name='sdpo_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_ep${NUM_EPOCHS}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_reward_count"
+exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_ep${NUM_EPOCHS}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_corrf${CORRECTNESS_FEEDBACK}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -115,6 +117,7 @@ DATA=(
     data.shuffle=False
     custom_reward_function.path=selfevolve/sdpo/utils/reward_score/feedback/finer.py
     custom_reward_function.name=compute_score_count
+    custom_reward_function.reward_kwargs.correctness_feedback=${CORRECTNESS_FEEDBACK}
 )
 
 MODEL=(
@@ -125,13 +128,14 @@ MODEL=(
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=$LR
     actor_rollout_ref.actor.ppo_mini_batch_size=32
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
-    actor_rollout_ref.actor.self_distillation.distillation_topk=100
-    actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
-    actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.self_distillation.distillation_topk=100
+    actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
+    actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
+    actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
 )
 
 ROLLOUT=(
@@ -141,7 +145,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.35
     actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
@@ -155,6 +159,7 @@ REF=(
 )
 
 ALGORITHM=(
+    algorithm.lam=${LAMBDA}
     algorithm.rollout_correction.rollout_is=token
 )
 

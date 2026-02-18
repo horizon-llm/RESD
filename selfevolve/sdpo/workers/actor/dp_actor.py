@@ -400,7 +400,21 @@ class DataParallelPPOActor(BasePPOActor):
                                     topk_indices_rmpad.unsqueeze(0), dim=1, padding=True
                                 ).squeeze(0)
                             topk_logits_rmpad = torch.gather(logits_rmpad, dim=-1, index=topk_indices_rmpad)
-                        logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
+                        # Compute logsumexp in chunks along the token dimension to
+                        # reduce peak memory (avoids materializing a full
+                        # (total_nnz, vocab_size) exp intermediate all at once).
+                        _LSE_CHUNK = 4096
+                        n_tokens = logits_rmpad.shape[0]
+                        if n_tokens > _LSE_CHUNK:
+                            logsumexp_rmpad = torch.cat(
+                                [
+                                    torch.logsumexp(logits_rmpad[i : i + _LSE_CHUNK], dim=-1, keepdim=True)
+                                    for i in range(0, n_tokens, _LSE_CHUNK)
+                                ],
+                                dim=0,
+                            )
+                        else:
+                            logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
                         topk_logps_rmpad = topk_logits_rmpad - logsumexp_rmpad
 
                     # Compute sum_pi_squared if requested (for optimal_token_baseline)
@@ -412,6 +426,11 @@ class DataParallelPPOActor(BasePPOActor):
                                 self.calculate_sum_pi_squared_from_logits, logits_rmpad
                             )
                         )
+
+                    # Free the large logits tensor as early as possible.
+                    # After this point only log_probs / topk / sum_pi_squared
+                    # (all much smaller) are needed.
+                    del logits_rmpad
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:

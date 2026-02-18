@@ -318,10 +318,9 @@ def setup_paths(
     from datetime import datetime
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_slug = sanitize_model_name(generator_model)
-    run_folder = f"ace_run_{timestamp}_{task_name}_{model_slug}_{mode}"
+    # model_slug = sanitize_model_name(generator_model)
 
-    save_path = os.path.join(save_dir, run_folder)
+    save_path = os.path.join("results", save_dir+f"_{timestamp}")
     os.makedirs(save_path, exist_ok=True)
 
     log_dir = os.path.join(save_path, "detailed_llm_logs")

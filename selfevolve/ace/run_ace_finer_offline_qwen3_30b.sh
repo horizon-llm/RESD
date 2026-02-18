@@ -18,7 +18,7 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 nohup "$PYTHON" -m vllm.entrypoints.openai.api_server \
     --model $MODEL \
-    --max-model-len 131072 \
+    --max-model-len 262144 \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 2 \
@@ -79,6 +79,7 @@ result_dir="results_${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESP
     --mode offline \
     --save_path $result_dir \
     --num_epochs $NUM_EPOCHS \
+    --save_steps $EVAL_STEPS \
     --eval_steps $EVAL_STEPS \
     --max_tokens $MAX_RESPONSE_LENGTH \
     --api_provider vllm \
