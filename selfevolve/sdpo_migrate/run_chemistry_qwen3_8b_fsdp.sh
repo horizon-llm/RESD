@@ -22,10 +22,10 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="sdpo"
 
-python selfevolve/sdpo/preprocess.py --data_source selfevolve/sdpo/datasets/tooluse
+python selfevolve/sdpo/preprocess.py --data_source selfevolve/sdpo/datasets/sciknoweval/chemistry
 
-finer_train_path=selfevolve/sdpo/datasets/tooluse/train.parquet
-finer_val_path=selfevolve/sdpo/datasets/tooluse/test.parquet
+finer_train_path=selfevolve/sdpo/datasets/sciknoweval/chemistry/train.parquet
+finer_val_path=selfevolve/sdpo/datasets/sciknoweval/chemistry/test.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
 TRAIN_BATCH_SIZE=32
@@ -36,7 +36,7 @@ CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
 ALPHA=${ALPHA:-0.5}
 EMA_WEIGHT=${EMA_WEIGHT:-0.05}
-TASK=tooluse
+TASK=chemistry
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
@@ -44,10 +44,10 @@ MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 ENABLE_THINKING=${ENABLE_THINKING:-False}
 VAL_ROLLOUT_N=${VAL_ROLLOUT_N:-16}
-INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-True}
+INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-False}
 SHUFFLE=${SHUFFLE:-True}
 
-project_name='sdpo_tooluse'
+project_name='sdpo_chemistry'
 exp_name="qwen3_8b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_maxep${NUM_EPOCHS}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_valn${VAL_ROLLOUT_N}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}"
 
 ########################### Sync Results ###########################
@@ -98,7 +98,7 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=${SHUFFLE}
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/tooluse.py
+    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/mcq.py
     custom_reward_function.name=compute_score
 )
 

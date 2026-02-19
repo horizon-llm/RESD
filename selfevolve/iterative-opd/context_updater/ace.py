@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 from verl import DataProto
 
-from .prompts.ace_generator import GENERATOR_PROMPT
+from .prompts import GENERATOR_PROMPT, REFLECTOR_PROMPT
 
 def _extract_bullet_ids(response: str, use_json_mode: bool) -> List[str]:
     """
@@ -68,5 +68,21 @@ class ACEContextUpdater:
 
 ## OTHERS"""
 
-    def update(self, batch: DataProto):
-        pass
+    def update(self, batch: DataProto, worker, tokenizer, feedback_list: List[str]):
+        # get response texts
+        device = batch.batch["input_ids"].device
+        response_mask = batch.batch["response_mask"]
+        responses = batch.batch["responses"]
+        response_texts = [tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
+        bullet_ids = 
+        prompt_texts = [msgs[-1] for msgs in batch.non_tensor_batch["raw_prompt"]]
+        
+        # generate reflector prompts
+        reflector_prompts = []
+        for prompt, response, feedback in zip(prompt_texts, response_texts, feedback_list):
+            reflector_prompt = REFLECTOR_PROMPT.format(
+                prompt,
+                response,
+                feedback
+            )
+            reflector_prompts.append(reflector_prompt)

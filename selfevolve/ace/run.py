@@ -79,12 +79,17 @@ def parse_args():
     parser.add_argument("--batch_mode", action="store_true",
                         help="Enable batch mode for parallel generation and reflection "
                              "(only affects offline training)")
+    parser.add_argument("--batch_mode_all", action="store_true",
+                        help="Enable batch mode with fully parallel curation: all curator "
+                             "LLM calls fire against the same playbook snapshot and their "
+                             "operations are merged before application "
+                             "(only affects offline training)")
     parser.add_argument("--batch_size", type=int, default=10,
                         help="Number of samples to process in parallel per batch "
-                             "(only used with --batch_mode)")
+                             "(only used with --batch_mode or --batch_mode_all)")
     parser.add_argument("--batch_workers", type=int, default=10,
                         help="Number of parallel worker threads per batch "
-                             "(only used with --batch_mode)")
+                             "(only used with --batch_mode or --batch_mode_all)")
 
     # Wandb configuration
     parser.add_argument("--wandb_project", type=str, default=None,
@@ -212,8 +217,24 @@ def main():
     else:
         print("Using empty playbook as initial playbook\n")
     
-    # Create ACE system (use batch variant if --batch_mode is set)
-    if args.batch_mode:
+    # Create ACE system (use batch variant if --batch_mode or --batch_mode_all is set)
+    if args.batch_mode_all:
+        from selfevolve.ace import ACEBatchAll
+        ace_system = ACEBatchAll(
+            api_provider=args.api_provider,
+            generator_model=args.generator_model,
+            reflector_model=args.reflector_model,
+            curator_model=args.curator_model,
+            max_tokens=args.max_tokens,
+            initial_playbook=initial_playbook,
+            use_bulletpoint_analyzer=args.use_bulletpoint_analyzer,
+            bulletpoint_analyzer_threshold=args.bulletpoint_analyzer_threshold,
+            batch_size=args.batch_size,
+            batch_workers=args.batch_workers
+        )
+        print(f"Using ACEBatchAll (batch_size={args.batch_size}, "
+              f"batch_workers={args.batch_workers})\n")
+    elif args.batch_mode:
         from selfevolve.ace import ACEBatch
         ace_system = ACEBatch(
             api_provider=args.api_provider,
@@ -261,6 +282,7 @@ def main():
         'bulletpoint_analyzer_threshold': args.bulletpoint_analyzer_threshold,
         'api_provider': args.api_provider,
         'batch_mode': args.batch_mode,
+        'batch_mode_all': args.batch_mode_all,
         'batch_size': args.batch_size,
         'batch_workers': args.batch_workers,
         'wandb_project': args.wandb_project,

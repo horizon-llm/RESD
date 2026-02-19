@@ -13,30 +13,27 @@ GENERATOR_PROMPT = """You are an analysis expert tasked with answering questions
 - If the playbook contains relevant code snippets or formulas, use them appropriately
 - Double-check your calculations and logic before providing the final answer
 
-Your output should be a json object wrapped between <answer> and </answer>, which contains the following fields:
+Your output should be a json object, which contains the following fields:
+- reasoning: your chain of thought / reasoning / thinking process, detailed analysis and calculations
 - bullet_ids: each line in the playbook has a bullet_id. all bulletpoints in the playbook that's relevant, helpful for you to answer this question, you should include their bullet_id in this list
 - final_answer: your concise final answer
 
 
 **Playbook:**
-{}
+{playbook}
 
 **Reflection:**
-{}
+{reflection}
 
-**Question:**
-{}
-
-**Context:**
-{}
+**Prompt:**
+{prompt}
 
 **Answer in this exact JSON format:**
-<answer>
 {{
+  "reasoning": "[Your chain of thought / reasoning / thinking process, detailed analysis and calculations]",  
   "bullet_ids": ["calc-00001", "fin-00002"],  
   "final_answer": "[Your concise final answer here]"
 }}
-</answer>
 
 ---
 """

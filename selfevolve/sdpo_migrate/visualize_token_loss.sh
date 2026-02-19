@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-"checkpoints"}
-TOKENIZER_NAME="Qwen/Qwen3-4B"
+TOKENIZER_NAME=${TOKENIZER_NAME:-"Qwen/Qwen3-4B"}
 DUMP_DIR="$CHECKPOINT_PATH/token_loss_dumps"
 
 # Plot each step individually

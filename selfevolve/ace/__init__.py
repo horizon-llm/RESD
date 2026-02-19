@@ -47,8 +47,9 @@ Usage:
 
 from .ace import ACE
 from .ace_batch import ACEBatch
+from .ace_batch_all import ACEBatch as ACEBatchAll
 from .core import Generator, Reflector, Curator, BulletpointAnalyzer
 
-__all__ = ['ACE', 'ACEBatch', 'Generator', 'Reflector', 'Curator', 'BulletpointAnalyzer']
+__all__ = ['ACE', 'ACEBatch', 'ACEBatchAll', 'Generator', 'Reflector', 'Curator', 'BulletpointAnalyzer']
 
 __version__ = "1.0.0"
