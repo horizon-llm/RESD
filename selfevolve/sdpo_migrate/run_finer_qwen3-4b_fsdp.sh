@@ -49,7 +49,7 @@ MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 
 project_name='sdpo_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_maxep${NUM_EPOCHS}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_reward_count"
+exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -155,7 +155,8 @@ TRAINER=(
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
-    trainer.save_freq=16
+    trainer.max_actor_ckpt_to_keep=1
+    trainer.save_freq=4
     trainer.test_freq=4
 )
 

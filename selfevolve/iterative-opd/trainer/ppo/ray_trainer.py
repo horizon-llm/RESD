@@ -69,6 +69,7 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from ...context_updater import ACEContextUpdater
+from ...context_updater.prompts.ace_generator import TEACHER_PROMPT
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -316,7 +317,7 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-        self.context_updater = ACEContextUpdater(config.context_updater.ace)
+        self.context_updater = ACEContextUpdater(config)
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -608,6 +609,13 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict,
             batch_size=batch_size,
         )
+        # wake up rollout worker group to update context with feedback and get reflection list
+        self.checkpoint_manager.update_weights()
+
+        reflection_list = self.context_updater.update(batch, self.actor_rollout_wg, self.tokenizer, feedback_list)
+
+        # sleep again to save resource before actor update
+        self.checkpoint_manager.sleep_replicas()
 
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
         solution_strs = [
@@ -647,10 +655,12 @@ class RayPPOTrainer:
 
             # combine solution and feedback sections
             if use_feedback or has_solution:
-                reprompt_text = self_distillation_cfg.reprompt_template.format(
+                reprompt_text = TEACHER_PROMPT.format(
                     prompt=prompt_texts[i],
                     solution=solution_section,
                     feedback=feedback_section,
+                    reflection=reflection_list[i] if reflection_list is not None else "",
+                    playbook=self.context_updater.playbook
                 )
             else:
                 reprompt_text = prompt_texts[i]
@@ -687,7 +697,7 @@ class RayPPOTrainer:
 
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
+            [solution_strs[i] is not None or feedback_used[i] or (reflection_list is not None and reflection_list[i] is not None) for i in range(batch_size)],
             dtype=torch.float32,
             device=device
         )

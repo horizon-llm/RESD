@@ -48,7 +48,7 @@ INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-False}
 SHUFFLE=${SHUFFLE:-True}
 
 project_name='sdpo_chemistry'
-exp_name="qwen3_8b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_maxep${NUM_EPOCHS}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_valn${VAL_ROLLOUT_N}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}"
+exp_name="qwen3_8b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}"
 
 ########################### Sync Results ###########################
 
@@ -156,7 +156,8 @@ TRAINER=(
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
-    trainer.save_freq=16
+    trainer.max_actor_ckpt_to_keep=1
+    trainer.save_freq=4
     trainer.test_freq=4
 )
 
