@@ -69,7 +69,7 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from ...context_updater import ACEContextUpdater
-from ...context_updater.prompts.ace_generator import TEACHER_PROMPT
+from ...context_updater.prompts.ace_generator import TEACHER_PROMPT, GENERATOR_PROMPT
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -461,6 +461,13 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
+    def _log_playbook(self, playbook: str, step: int):
+        """Log the current playbook text to the configured logger (wandb only)."""
+        if "wandb" in self.config.trainer.logger:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"playbook/text": wandb.Html(f"<pre>{playbook}</pre>")}, step=step)
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -600,7 +607,8 @@ class RayPPOTrainer:
         response_mask = batch.batch["response_mask"]
         responses = batch.batch["responses"]
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch["raw_prompt"]]
+        key = "raw_prompt_original" if "raw_prompt_original" in batch.non_tensor_batch else "raw_prompt"
+        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[key]]
         batch_size = batch.batch.batch_size[0]
 
         # Extract feedback if available and include_environment_feedback is enabled
@@ -609,10 +617,19 @@ class RayPPOTrainer:
             reward_extra_infos_dict=reward_extra_infos_dict,
             batch_size=batch_size,
         )
-        # wake up rollout worker group to update context with feedback and get reflection list
+        # Wake up the embedded vLLM replicas and sync current FSDP weights into them.
+        # update_weights() calls rollout_mode() on the actor workers via the async path
+        # (await, not run_until_complete), so there is no "event loop already running" issue.
+        print(f"[ACE] Updating model weights before context update (step={self.global_steps})...")
         self.checkpoint_manager.update_weights()
 
-        reflection_list = self.context_updater.update(batch, self.actor_rollout_wg, self.tokenizer, feedback_list)
+        # Use the async server interface (async_rollout_manager) for context update inference.
+        # This sends requests to the vLLM HTTP server directly — no second rollout_mode() call,
+        # so there is no double-wake CUDA error.
+        print(f"[ACE] Running context update (step={self.global_steps})...")
+        reflection_list, playbook_stats = self.context_updater.update(batch, self.async_rollout_manager, self.tokenizer, feedback_list)
+        print(f"[ACE] Context update complete (step={self.global_steps}).")
+        self._log_playbook(self.context_updater.playbook, self.global_steps)
 
         # sleep again to save resource before actor update
         self.checkpoint_manager.sleep_replicas()
@@ -631,7 +648,8 @@ class RayPPOTrainer:
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = batch.non_tensor_batch["raw_prompt"][i][:-1]
+            key = "raw_prompt_original" if "raw_prompt_original" in batch.non_tensor_batch else "raw_prompt"
+            system_messages = batch.non_tensor_batch[key][i][:-1]
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
@@ -654,12 +672,12 @@ class RayPPOTrainer:
                 )
 
             # combine solution and feedback sections
-            if use_feedback or has_solution:
+            if use_feedback or has_solution or (reflection_list is not None and reflection_list[i] is not None):
                 reprompt_text = TEACHER_PROMPT.format(
                     prompt=prompt_texts[i],
                     solution=solution_section,
                     feedback=feedback_section,
-                    reflection=reflection_list[i] if reflection_list is not None else "",
+                    reflection=self._remove_thinking_trace(reflection_list[i]) if reflection_list is not None and reflection_list[i] is not None else "",
                     playbook=self.context_updater.playbook
                 )
             else:
@@ -684,6 +702,12 @@ class RayPPOTrainer:
             padding=True,
             truncation=True,
         )
+        # breakpoint()
+        # print(f"Batch size: {batch_size}")
+        # print(f"Teacher prompt sample (idx=0): {messages[0]}")
+        # print(f"Prompt text sample (idx=0): {prompt_texts[0]}")
+        # print(f"Teacher prompt input_ids sample (idx=0): {teacher_prompt['input_ids'][0]}")
+        # print(f"Teacher prompt input_ids shape: {teacher_prompt['input_ids'].shape}, attention_mask shape: {teacher_prompt['attention_mask'].shape}")
         teacher_input_ids = torch.cat([teacher_prompt["input_ids"].to(device), responses], dim=1)
         teacher_attention_mask = torch.cat([teacher_prompt["attention_mask"].to(device), response_mask], dim=1)
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
@@ -708,15 +732,21 @@ class RayPPOTrainer:
         num_with_feedback_available = sum(1 for f in feedback_list if f is not None)
         num_with_feedback_used = sum(1 for f in feedback_used if f)
         num_with_solution = sum(1 for s in solution_strs if s is not None)
+        num_with_reflection = sum(1 for r in reflection_list if r is not None)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0]) / len(uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
+            "self_distillation/reflection_used_fraction": num_with_reflection / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
             "self_distillation/reprompt_len_mean": reprompt_lens.mean().item(),
             "self_distillation/reprompt_len_max": reprompt_lens.max().item(),
             "self_distillation/reprompt_truncated_fraction": (reprompt_lens == self_distillation_cfg.max_reprompt_len).float().mean().item(),
+            "playbook/total_bullets": playbook_stats.get("total_bullets", 0),
+            "playbook/high_performing": playbook_stats.get("high_performing", 0),
+            "playbook/problematic": playbook_stats.get("problematic", 0),
+            "playbook/unused": playbook_stats.get("unused", 0),
         }
         return DataProto.from_dict(tensors={
             "teacher_input_ids": teacher_input_ids,
@@ -1441,6 +1471,59 @@ class RayPPOTrainer:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
+    
+    def _reformalize_prompts(self, batch: DataProto) -> DataProto:
+        """Reformalize the raw prompts and re-tokenize before generation."""
+        raw_prompts = batch.non_tensor_batch["raw_prompt"]  # list of message lists
+
+        # 1. Modify the raw prompt messages
+        new_raw_prompts = []
+        for messages in raw_prompts:
+            messages = list(messages) # copy
+
+            messages[-1] = {**messages[-1], "content": GENERATOR_PROMPT.format(
+                prompt=messages[-1]["content"],
+                reflection="(empty)", # no reflection for student model
+                playbook=self.context_updater.get_empty_playbook() # empty playbook for student model
+            )}
+
+            new_raw_prompts.append(messages)
+        
+        # for both sync and async, we need the raw prompt
+        batch.non_tensor_batch["raw_prompt_original"] = batch.non_tensor_batch["raw_prompt"].copy()
+        batch.non_tensor_batch["raw_prompt"] = np.array(new_raw_prompts, dtype=object)
+        
+        # 2. Re-tokenize the new raw prompts for sync generation
+        max_len = self.config.actor_rollout_ref.rollout.prompt_length
+        apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {}) or {}
+        tokenized = self.tokenizer.apply_chat_template(
+            new_raw_prompts,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_len,
+            return_dict=True,
+            **apply_chat_template_kwargs,
+        )
+
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        position_ids = compute_position_id_with_mask(attention_mask)
+
+        if batch.batch is not None and "input_ids" in batch.batch.keys():
+            device = batch.batch["input_ids"].device
+            batch.batch["input_ids"] = input_ids.to(device)
+            batch.batch["attention_mask"] = attention_mask.to(device)
+            batch.batch["position_ids"] = position_ids.to(device)
+        else:
+            from tensordict import TensorDict
+            batch.batch = TensorDict(
+                source={"input_ids": input_ids, "attention_mask": attention_mask, "position_ids": position_ids},
+                batch_size=(input_ids.shape[0],),
+            )
+        return batch
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1596,6 +1679,11 @@ class RayPPOTrainer:
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
 
+                gen_batch_output = self._reformalize_prompts(gen_batch_output)
+                # Save raw_prompt_original before generate_sequences, which may not preserve
+                # non_tensor_batch keys that were added after the batch was constructed.
+                raw_prompt_original_backup = gen_batch_output.non_tensor_batch.get("raw_prompt_original")
+
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
@@ -1652,6 +1740,8 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    if raw_prompt_original_backup is not None and "raw_prompt_original" not in batch.non_tensor_batch:
+                        batch.non_tensor_batch["raw_prompt_original"] = raw_prompt_original_backup
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)

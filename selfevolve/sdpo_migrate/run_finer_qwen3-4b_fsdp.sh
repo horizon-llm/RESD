@@ -47,9 +47,10 @@ NUM_EPOCHS=${NUM_EPOCHS:-3}
 CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
+DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 
 project_name='sdpo_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_reward_count"
+exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -115,7 +116,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.self_distillation.distillation_topk=100
+    actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT

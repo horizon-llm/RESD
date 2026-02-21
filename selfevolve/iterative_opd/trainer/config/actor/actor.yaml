@@ -124,6 +124,9 @@ self_distillation:
   # IS clip for loss; null disables IS weighting
   is_clip: 2
 
+  # This is for the context updater to decide how often to reset the context during training.
+  concise_frequency: 4
+
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
     {prompt}{solution}{feedback}

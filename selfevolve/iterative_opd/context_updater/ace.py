@@ -1,14 +1,33 @@
 import json
 import re
+import random
 from typing import List, Tuple, Dict, Any
 from copy import deepcopy
 
+import numpy as np
+
 from verl import DataProto
-from verl.utils.model import compute_position_id_with_mask
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
-from .prompts import GENERATOR_PROMPT, REFLECTOR_PROMPT, CURATOR_PROMPT
+from .prompts import REFLECTOR_PROMPT, CURATOR_PROMPT
 from .playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats, extract_json_from_text, apply_curator_operations
+
+
+def _check_prompt_lengths(prompts: List[str], tokenizer, max_prompt_length: int, label: str = "prompt") -> None:
+    """Raise an error if any prompt exceeds max_prompt_length after chat-template tokenization."""
+    for i, p in enumerate(prompts):
+        token_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": p}],
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        if len(token_ids) > max_prompt_length:
+            raise ValueError(
+                f"[ACE] {label} {i} has {len(token_ids)} tokens which exceeds "
+                f"prompt_length={max_prompt_length}. "
+                f"Increase rollout.prompt_length or shorten the prompt template."
+            )
+
 
 def _extract_bullet_ids(response: str, use_json_mode: bool) -> List[str]:
     """
@@ -68,9 +87,9 @@ def _extract_bullet_tags(
     
     if use_json_mode:
         try:
-            response_json = json.loads(response)
+            response_json = extract_json_from_text(response)
             bullet_tags = response_json.get("bullet_tags", [])
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, AttributeError):
             print(f"Warning: Failed to parse bullet tags from JSON response")
     else:
         # Try to extract from non-JSON response
@@ -165,10 +184,11 @@ class ACEContextUpdater:
     def __init__(self, config):
         self.config = config
 
-        self.playbook = self._initialize_empty_playbook()
+        self.playbook = self.get_empty_playbook()
         self.next_global_id = 1
     
-    def _initialize_empty_playbook(self) -> str:
+    @staticmethod
+    def get_empty_playbook() -> str:
         """Initialize an empty playbook with standard sections."""
         return """## STRATEGIES & INSIGHTS
 
@@ -184,17 +204,41 @@ class ACEContextUpdater:
 
 ## OTHERS"""
 
-    def update(self, batch: DataProto, worker, tokenizer, feedback_list: List[str]):
+    def _concise_playbook(self, playbook: str) -> str:
+        """
+        Concise the playbook
+
+        Args:
+            playbook: The current playbook content
+        Returns:
+            Concised playbook content
+        """
+        # dummy concise for now
+        self.playbook = self.get_empty_playbook()
+        return self.playbook
+
+    def update(self, batch: DataProto, async_rollout_manager, tokenizer, feedback_list: List[str]):
+        batch_size = batch.batch["input_ids"].shape[0]
+        print(f"[ACE] Starting context update for {batch_size} samples "
+              f"(playbook bullets: {self.next_global_id - 1})")
+
+        # concise the playbook after a few gradient steps
+        self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        concise_frequency = self_distillation_cfg.concise_frequency if self_distillation_cfg else None
+        if concise_frequency and (self.next_global_id-1) % concise_frequency == 0:
+            print(f"[ACE] Concising playbook (frequency={concise_frequency})...")
+            self.playbook = self._concise_playbook(self.playbook)
+
         # get response texts
-        device = batch.batch["input_ids"].device
         responses = batch.batch["responses"]
         response_texts = [tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        prompt_texts = [msgs[-1] for msgs in batch.non_tensor_batch["raw_prompt"]]
+        key = "raw_prompt_original" if "raw_prompt_original" in batch.non_tensor_batch else "raw_prompt"
+        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[key]]
 
         # extract playbook parts used by the generator
         bullet_ids = [_extract_bullet_ids(response, use_json_mode=True) for response in response_texts]
-        playbook_parts_used = extract_playbook_bullets(deepcopy(self.playbook), bullet_ids)
-        
+        playbook_parts_used = [extract_playbook_bullets(self.playbook, ids) for ids in bullet_ids]
+
         # prepare reflector prompts
         reflector_prompts = []
         for prompt, response, feedback, playbook_parts in zip(prompt_texts, response_texts, feedback_list, playbook_parts_used):
@@ -206,24 +250,26 @@ class ACEContextUpdater:
             )
             reflector_prompts.append(reflector_prompt)
 
-        # Tokenize
-        encoding = tokenizer(reflector_prompts, padding=True, truncation=True, return_tensors="pt", truncation_side="right").to(device)
-        input_ids = encoding["input_ids"].to(device)
-        attention_mask = encoding["attention_mask"].to(device)
-        position_ids = compute_position_id_with_mask(attention_mask).to(device)
+        # Build DataProto for the async server interface.
+        # The agent loop (SingleTurnAgentLoop) expects raw_prompt: a list of message dicts.
+        # It applies the chat template and tokenizes internally, so we skip manual tokenization.
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        reflector_messages = np.array(
+            [[{"role": "user", "content": p}] for p in reflector_prompts], dtype=object
+        )
+        reflector_batch = DataProto.from_dict(
+            non_tensors={"raw_prompt": reflector_messages},
+        )
+        reflector_batch.meta_info = {"validate": False}
 
-        # Build DataProto for the worker
-        reflector_batch = DataProto.from_dict(tensors={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids
-        })
+        # Validate prompt lengths before generating
+        max_prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
+        _check_prompt_lengths(reflector_prompts, tokenizer, max_prompt_length, label="reflector prompt")
 
-        # Pad to be divisible by worker.world_size
-        reflector_batch_padded, pad_size = pad_dataproto_to_divisor(reflector_batch, worker.world_size)
-
-        # Generate reflections via the rollout worker
-        reflector_output_padded = worker.generate_sequences(reflector_batch_padded)
+        # Pad to be divisible by num_workers, generate, then unpad
+        reflector_batch_padded, pad_size = pad_dataproto_to_divisor(reflector_batch, num_workers)
+        print(f"[ACE] Generating reflections for {batch_size} samples...")
+        reflector_output_padded = async_rollout_manager.generate_sequences(reflector_batch_padded)
         reflector_output = unpad_dataproto(reflector_output_padded, pad_size)
 
         # Decode reflections and extract bullet tags
@@ -231,13 +277,19 @@ class ACEContextUpdater:
             tokenizer.decode(ids, skip_special_tokens=True) for ids in reflector_output.batch["responses"]
         ]
 
+        for reflection in reflection_texts:
+            if random.random() < 1/4:
+                print(f"Reflection preview: {reflection}...")
+
         bullet_tags = [_extract_bullet_tags(response, use_json_mode=True) for response in reflection_texts]
 
         # Sequentially update the bullet counts
+        tags_updated = sum(1 for t in bullet_tags if t)
+        print(f"[ACE] Updating bullet counts from {tags_updated}/{batch_size} reflections...")
         for tags in bullet_tags:
             if tags:
-                self.playbook = update_bullet_counts(deepcopy(self.playbook), tags)
-        
+                self.playbook = update_bullet_counts(self.playbook, tags)
+
         # prepare curator prompts
         stats = get_playbook_stats(self.playbook)
         stats_str = json.dumps(stats, indent=2)
@@ -250,31 +302,33 @@ class ACEContextUpdater:
                 current_playbook=self.playbook
             )
             curator_prompts.append(curator_prompt)
-        
-        # Tokenize curator prompts
-        curator_encoding = tokenizer(curator_prompts, padding=True, truncation=True, return_tensors="pt", truncation_side="right").to(device)
-        curator_input_ids = curator_encoding["input_ids"].to(device)
-        curator_attention_mask = curator_encoding["attention_mask"].to(device)
-        curator_position_ids = compute_position_id_with_mask(curator_attention_mask).to(device)
 
-        # Build DataProto for the worker
-        curator_batch = DataProto.from_dict(tensors={
-            "input_ids": curator_input_ids,
-            "attention_mask": curator_attention_mask,
-            "position_ids": curator_position_ids
-        })
+        # Build DataProto for the curator via async server interface
+        curator_messages = np.array(
+            [[{"role": "user", "content": p}] for p in curator_prompts], dtype=object
+        )
+        curator_batch = DataProto.from_dict(
+            non_tensors={"raw_prompt": curator_messages},
+        )
+        curator_batch.meta_info = {"validate": False}
 
-        # Pad to be divisible by worker.world_size
-        curator_batch_padded, curator_pad_size = pad_dataproto_to_divisor(curator_batch, worker.world_size)
+        # Validate prompt lengths before generating
+        _check_prompt_lengths(curator_prompts, tokenizer, max_prompt_length, label="curator prompt")
 
-        # Generate curated playbooks via the rollout worker
-        curator_output_padded = worker.generate_sequences(curator_batch_padded)
+        # Pad to be divisible by num_workers, generate, then unpad
+        curator_batch_padded, curator_pad_size = pad_dataproto_to_divisor(curator_batch, num_workers)
+        print(f"[ACE] Generating curator operations for {batch_size} samples...")
+        curator_output_padded = async_rollout_manager.generate_sequences(curator_batch_padded)
         curator_output = unpad_dataproto(curator_output_padded, curator_pad_size)
 
         # Decode
         curation_texts = [
             tokenizer.decode(ids, skip_special_tokens=True) for ids in curator_output.batch["responses"]
         ]
+
+        for curation in curation_texts:
+            if random.random() < 1/4:
+                print(f"Curator response preview: {curation}...")
 
         # Post-process curator outputs to update the playbook
         all_operations = []
@@ -305,5 +359,11 @@ class ACEContextUpdater:
             self.playbook, self.next_global_id = apply_curator_operations(
                 self.playbook, all_operations, self.next_global_id
             )
-        
-        return reflection_texts
+        final_stats = get_playbook_stats(self.playbook)
+        print(f"[ACE] Playbook updated: {len(all_operations)} operations applied, "
+              f"total_bullets={final_stats['total_bullets']}, "
+              f"high_performing={final_stats['high_performing']}, "
+              f"problematic={final_stats['problematic']}, "
+              f"unused={final_stats['unused']}")
+
+        return reflection_texts, final_stats

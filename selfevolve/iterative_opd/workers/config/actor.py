@@ -66,6 +66,7 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
+    concise_frequency: int = 4
     reprompt_template: str = (
         "{prompt}{solution}{feedback}\n\n"
         "Correctly solve the original question.\n"

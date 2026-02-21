@@ -316,5 +316,16 @@ ray_kwargs:
     # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
     num_cpus: null
 
+    # Runtime environment for Ray workers
+    runtime_env:
+
+      # Environment variables to set in Ray workers
+      env_vars:
+
+        # Enable Ray legacy debugger
+        RAY_DEBUG: legacy
+
+
+
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

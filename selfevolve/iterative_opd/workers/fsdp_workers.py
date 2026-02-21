@@ -15,6 +15,8 @@
 The main entry point to run the PPO algorithm
 """
 
+import asyncio
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -967,16 +969,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         prompts.meta_info.update(meta_info)
 
         timing_generate = {}
+        _loop_already_running = False
         if self._is_actor:  # For rollout only, we do not switch context.
             loop = get_event_loop()
-            loop.run_until_complete(self.rollout_mode())
+            _loop_already_running = loop.is_running()
+            if _loop_already_running:
+                # Called from within an already-running event loop (e.g. the TaskRunner Ray
+                # actor uses uvloop, so loop.run_until_complete() raises "this event loop is
+                # already running").  Run the async mode-switch in a ThreadPoolExecutor worker
+                # that gets its own fresh event loop via asyncio.run().
+                #
+                # We capture the current CUDA device ID here (thread-local in PyTorch) and
+                # restore it inside the coroutine so the new thread uses the right GPU.
+                _device_id = get_device_id()
+
+                async def _rollout_mode_on_device():
+                    torch.cuda.set_device(_device_id)
+                    await self.rollout_mode()
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(asyncio.run, _rollout_mode_on_device()).result()
+            else:
+                loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
 
         if self._is_actor:
-            loop.run_until_complete(self.trainer_mode())
+            if _loop_already_running:
+                _device_id = get_device_id()
+
+                async def _trainer_mode_on_device():
+                    torch.cuda.set_device(_device_id)
+                    await self.trainer_mode()
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(asyncio.run, _trainer_mode_on_device()).result()
+            else:
+                loop.run_until_complete(self.trainer_mode())
             log_gpu_memory_usage("After switch to trainer mode", logger=logger)
 
         # We calculate the average timing across all ranks
