@@ -13,6 +13,13 @@ from .prompts import REFLECTOR_PROMPT, CURATOR_PROMPT
 from .playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats, extract_json_from_text, apply_curator_operations
 
 
+def _remove_thinking_trace(text: str) -> str:
+    # Case 1: complete <think>...</think> block in response
+    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 2: <think> was in the prompt, response starts with thinking content
+    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+    return out_text
+
 def _check_prompt_lengths(prompts: List[str], tokenizer, max_prompt_length: int, label: str = "prompt") -> None:
     """Raise an error if any prompt exceeds max_prompt_length after chat-template tokenization."""
     for i, p in enumerate(prompts):
@@ -40,6 +47,7 @@ def _extract_bullet_ids(response: str, use_json_mode: bool) -> List[str]:
     Returns:
         List of bullet IDs
     """
+    response = _remove_thinking_trace(response)
     bullet_ids = []
     
     if use_json_mode:
@@ -111,6 +119,7 @@ def _extract_bullet_tags(
     Returns:
         List of dicts with 'id' and 'tag' keys
     """
+    response = _remove_thinking_trace(response)
     bullet_tags = []
 
     if use_json_mode:
@@ -164,6 +173,7 @@ def _extract_and_validate_operations(
     Raises:
         ValueError: If JSON is invalid or missing required fields
     """
+    response = _remove_thinking_trace(response)
     # Extract operations info
     operations_info = extract_json_from_text(response, "operations")
     
@@ -264,18 +274,14 @@ class ACEContextUpdater:
         key = "raw_prompt_original" if "raw_prompt_original" in batch.non_tensor_batch else "raw_prompt"
         prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[key]]
 
-        # extract playbook parts used by the generator
-        bullet_ids = [_extract_bullet_ids(response, use_json_mode=True) for response in response_texts]
-        playbook_parts_used = [extract_playbook_bullets(self.playbook, ids) for ids in bullet_ids]
-
         # prepare reflector prompts
         reflector_prompts = []
-        for prompt, response, feedback, playbook_parts in zip(prompt_texts, response_texts, feedback_list, playbook_parts_used):
+        for prompt, response, feedback in zip(prompt_texts, response_texts, feedback_list):
             reflector_prompt = REFLECTOR_PROMPT.format(
                 prompt=prompt,
-                response=response,
+                response=_remove_thinking_trace(response),
                 feedback=feedback,
-                playbook=playbook_parts
+                playbook=self.playbook,
             )
             reflector_prompts.append(reflector_prompt)
 
@@ -309,7 +315,7 @@ class ACEContextUpdater:
         bullet_tags = [_extract_bullet_tags(response, use_json_mode=True) for response in reflection_texts]
 
         for reflection, tags in zip(reflection_texts, bullet_tags):
-            if random.random() < 1/4:
+            if random.random() < 1/8:
                 print(f"Reflection preview: {reflection}...")
                 print(f"Extracted bullet tags: {tags}")
 
@@ -327,7 +333,7 @@ class ACEContextUpdater:
         for prompt, reflection in zip(prompt_texts, reflection_texts):
             curator_prompt = CURATOR_PROMPT.format(
                 prompt=prompt,
-                recent_reflection=reflection,
+                recent_reflection=_remove_thinking_trace(reflection),
                 playbook_stats=stats_str,
                 current_playbook=self.playbook
             )
@@ -357,7 +363,7 @@ class ACEContextUpdater:
         ]
 
         for curation in curation_texts:
-            if random.random() < 1/4:
+            if random.random() < 1/8:
                 print(f"Curator response preview: {curation}...")
 
         # Post-process curator outputs to update the playbook
@@ -396,4 +402,8 @@ class ACEContextUpdater:
               f"problematic={final_stats['problematic']}, "
               f"unused={final_stats['unused']}")
 
-        return reflection_texts, final_stats
+        return {
+            "response_texts": response_texts,
+            "reflection_texts": reflection_texts,
+            "final_stats": final_stats
+        }

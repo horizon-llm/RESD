@@ -4,8 +4,11 @@ import json
 
 
 def _remove_thinking_trace(text: str) -> str:
-        """Remove <think>...</think> tags and their content from text."""
-        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 1: complete <think>...</think> block in response
+    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 2: <think> was in the prompt, response starts with thinking content
+    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+    return out_text
 
 def _extract_boxed_content(text):
     """Helper function to extract content from \\boxed{} format"""
@@ -237,6 +240,8 @@ def compute_score_count(
         feedback = f"Your answer is partially correct. The correct answer is {ground_truth}."
     elif tag_score == 0.0 and not incorrect_format and correctness_feedback:
         feedback = f"Your answer is completely incorrect. The correct answer is {ground_truth}."
+    elif tag_score == 1.0 and correctness_feedback:
+        feedback = "Your answer is completely correct. Great job!"
     
     pred = answer if answer is not None else ""
 

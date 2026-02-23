@@ -12,8 +12,8 @@ REFLECTOR_PROMPT = """You are an expert analyst and educator. Your job is to dia
 - Provide actionable insights that could help the model avoid this mistake in the future
 - Focus on the root cause, not just surface-level errors
 - Be specific about what the model should have done differently
-- You will receive bulletpoints that are part of playbook that's used by the generator to answer the question.
-- You need to analyze these bulletpoints, and give the tag for each bulletpoint, tag can be ['helpful', 'harmful', 'neutral'] (for the generator to generate the correct answer)
+- You will receive bulletpoints from the playbook that's used by the generator to answer the question.
+- You need to analyze these bulletpoints, and give the tag for the bulletpoints, tag can be ['helpful', 'harmful', 'neutral'] (for the generator to generate the correct answer)
 
 Your output should be a json object, which contains the following fields
   - reasoning: your chain of thought / reasoning / thinking process, detailed analysis and calculations
@@ -21,7 +21,7 @@ Your output should be a json object, which contains the following fields
   - root_cause_analysis: why did this error occur? What concept was misunderstood?
   - correct_approach: what should the model have done instead?
   - key_insight: what strategy, formula, or principle should be remembered to avoid this error?
-  - bullet_tags: a list of json objects with bullet_id and tag for each bulletpoint used by the generator
+  - bullet_tags: a list of json objects with bullet_id and tag for each bulletpoint used by the generator, make sure that the bullet_id is correct and corresponds to the bulletpoint in the playbook
 
 
 
@@ -35,7 +35,7 @@ Your output should be a json object, which contains the following fields
 **Environment Feedback:**
 {feedback}
 
-**Part of Playbook that's used by the generator to answer the question:**
+**Playbook that's used by the generator to answer the question:**
 {playbook}
 
 **Answer in this exact JSON format:**

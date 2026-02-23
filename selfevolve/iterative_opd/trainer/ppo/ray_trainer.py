@@ -69,7 +69,7 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from ...context_updater import ACEContextUpdater
-from ...context_updater.prompts.ace_generator import TEACHER_PROMPT, GENERATOR_PROMPT
+from ...context_updater.prompts import TEACHER_PROMPT, STUDENT_PROMPT
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -580,8 +580,11 @@ class RayPPOTrainer:
     
     @staticmethod
     def _remove_thinking_trace(text: str) -> str:
-        """Remove <think>...</think> tags and their content from text."""
-        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 1: complete <think>...</think> block in response
+        out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 2: <think> was in the prompt, response starts with thinking content
+        out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+        return out_text
     
     def _get_solution(
         self,
@@ -639,7 +642,10 @@ class RayPPOTrainer:
         # This sends requests to the vLLM HTTP server directly — no second rollout_mode() call,
         # so there is no double-wake CUDA error.
         print(f"[ACE] Running context update (step={self.global_steps})...")
-        reflection_list, playbook_stats = self.context_updater.update(batch, self.async_rollout_manager, self.tokenizer, feedback_list)
+        context_update_results = self.context_updater.update(batch, self.async_rollout_manager, self.tokenizer, feedback_list)
+        previous_trials = context_update_results.get("response_texts", None)
+        reflection_list = context_update_results.get("reflection_texts", None)
+        playbook_stats = context_update_results.get("final_stats", None)
         print(f"[ACE] Context update complete (step={self.global_steps}).")
         self._log_playbook(self.context_updater.playbook, self.global_steps)
 
@@ -691,6 +697,7 @@ class RayPPOTrainer:
             if use_feedback or has_solution or use_reflection or use_playbook:
                 reprompt_text = TEACHER_PROMPT.format(
                     prompt=prompt_texts[i],
+                    previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
                     solution=solution_section,
                     feedback=feedback_section,
                     reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
@@ -1525,10 +1532,8 @@ class RayPPOTrainer:
         for messages in raw_prompts:
             messages = list(messages) # copy
 
-            messages[-1] = {**messages[-1], "content": GENERATOR_PROMPT.format(
+            messages[-1] = {**messages[-1], "content": STUDENT_PROMPT.format(
                 prompt=messages[-1]["content"],
-                reflection="(empty)", # no reflection for student model
-                playbook=self.context_updater.get_empty_playbook() # empty playbook for student model
             )}
 
             new_raw_prompts.append(messages)

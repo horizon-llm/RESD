@@ -66,7 +66,23 @@ def update_bullet_counts(playbook_text, bullet_tags):
     if not tag_map:
         print("Warning: No valid bullet tags found to update counts")
         return playbook_text
-    
+
+    # Collect all bullet IDs currently in the playbook
+    playbook_ids = set()
+    for line in lines:
+        parsed = parse_playbook_line(line)
+        if parsed:
+            playbook_ids.add(parsed['id'])
+
+    # Warn about any tag IDs that don't exist in the playbook
+    missing_ids = set(tag_map.keys()) - playbook_ids
+    if missing_ids:
+        print(f"Warning: {len(missing_ids)}/{len(tag_map)} tagged bullet IDs not found in playbook "
+              f"(likely hallucinated): {sorted(missing_ids)}")
+    matched_ids = set(tag_map.keys()) & playbook_ids
+    if matched_ids:
+        print(f"[ACE] Updating counts for {len(matched_ids)} matched bullets: {sorted(matched_ids)}")
+
     for line in lines:
         if line.strip().startswith('#') or not line.strip():
             # Preserve section headers and empty lines

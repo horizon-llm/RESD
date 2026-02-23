@@ -21,14 +21,19 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
+NUM_DATA=-1
 
 python selfevolve/iterative_opd/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
-               selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
-        --output data/finer/train.parquet data/finer/val.parquet
+        --num_data $NUM_DATA \
+        --output data/finer/train_${NUM_DATA}.parquet
+python selfevolve/iterative_opd/prepare_finer_dataset.py \
+        --task_name finer \
+        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
+        --output data/finer/val.parquet
 
-finer_train_path=data/finer/train.parquet
+finer_train_path=data/finer/train_${NUM_DATA}.parquet
 finer_val_path=data/finer/val.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
@@ -52,7 +57,7 @@ use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True}
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True}
 
 project_name='iterative_opd_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
+exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
 
 ########################### Sync Results ###########################
 

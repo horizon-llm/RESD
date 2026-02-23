@@ -82,7 +82,7 @@ def parse_context_and_question_formula(all_context):
 # Core conversion
 # ---------------------------------------------------------------------------
 
-def parse_and_format(raw_data, task_name: str) -> dict:
+def parse_and_format(raw_data, task_name: str, num_data: int = None) -> dict:
     """Convert one raw sample into the GRPO-ready record.
 
     Returns a dict with keys:
@@ -101,7 +101,7 @@ def parse_and_format(raw_data, task_name: str) -> dict:
     else:
         raise ValueError(f"Unknown task: {task_name}")
     
-    for item in raw_data:
+    for item in raw_data[:num_data] if num_data != -1 else raw_data:
         context = item.get('context', '')
         target = item.get('target', '')
 
@@ -141,12 +141,12 @@ def load_jsonl(path: str) -> list[dict]:
     return data
 
 
-def convert_dataset(input_path: str, output_path: str, task_name: str) -> None:
+def convert_dataset(input_path: str, output_path: str, task_name: str, num_data: int = None) -> None:
     """Read a raw FiNER JSONL file and write a Parquet file."""
     raw_data = load_jsonl(input_path)
     print(f"Loaded {len(raw_data)} samples from {input_path}")
 
-    records = parse_and_format(raw_data, task_name=task_name)
+    records = parse_and_format(raw_data, task_name=task_name, num_data=num_data)
 
     df = pd.DataFrame(records)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -181,13 +181,19 @@ def main():
         choices=["finer", "formula"],
         help="Task name for reward dispatching.",
     )
+    parser.add_argument(
+        "--num_data", "-n",
+        type=int,
+        default=-1,
+        help="Optional limit on number of samples to process (for testing).",
+    )
     args = parser.parse_args()
 
     if len(args.input) != len(args.output):
         parser.error("Number of --input and --output paths must match.")
 
     for inp, out in zip(args.input, args.output):
-        convert_dataset(inp, out, task_name=args.task_name)
+        convert_dataset(inp, out, task_name=args.task_name, num_data=args.num_data)
 
 
 if __name__ == "__main__":
