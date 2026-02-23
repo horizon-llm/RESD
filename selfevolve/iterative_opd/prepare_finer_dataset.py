@@ -24,7 +24,15 @@ import re
 
 import pandas as pd
 
-from selfevolve.sdpo_migrate.prompts.finer import FINER_PROMPT_TEMPLATE
+FINER_PROMPT_TEMPLATE = """
+Answer the given question based on the provided context.
+
+### Context:
+{context}
+
+### Question:
+{question}
+"""
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,8 @@ class SelfDistillationConfig(BaseConfig):
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
     concise_frequency: int = 4
+    use_reflection_in_teacher_prompt: bool = True
+    use_playbook_in_teacher_prompt: bool = True
     reprompt_template: str = (
         "{prompt}{solution}{feedback}\n\n"
         "Correctly solve the original question.\n"

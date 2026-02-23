@@ -69,28 +69,57 @@ def _extract_bullet_ids_regex(text: str) -> List[str]:
     matches = re.findall(pattern, text)
     return matches
 
+def _extract_bullet_tags_regex(text: str) -> List[Dict[str, str]]:
+    """
+    Extract bullet tags using regex pattern matching.
+
+    Args:
+        text: Text to extract bullet tags from
+
+    Returns:
+        List of dicts with 'id' and 'tag' keys
+    """
+    bullet_tags = []
+    id_pat = r'[a-z]{3,}-\d{5}'
+    # Try {"id": "xxx-00001", "tag": "..."}
+    matches = re.findall(
+        r'"id"\s*:\s*"(' + id_pat + r')"\s*,\s*"tag"\s*:\s*"(\w+)"', text
+    )
+    for bullet_id, tag in matches:
+        bullet_tags.append({"id": bullet_id, "tag": tag})
+    if not bullet_tags:
+        # Try reversed key order: {"tag": "...", "id": "xxx-00001"}
+        matches = re.findall(
+            r'"tag"\s*:\s*"(\w+)"\s*,\s*"id"\s*:\s*"(' + id_pat + r')"', text
+        )
+        for tag, bullet_id in matches:
+            bullet_tags.append({"id": bullet_id, "tag": tag})
+    return bullet_tags
+
+
 def _extract_bullet_tags(
     response: str,
     use_json_mode: bool
 ) -> List[Dict[str, str]]:
     """
     Extract bullet tags from reflector response.
-    
+
     Args:
         response: The reflector's response
         use_json_mode: Whether JSON mode was used
-        
+
     Returns:
         List of dicts with 'id' and 'tag' keys
     """
     bullet_tags = []
-    
+
     if use_json_mode:
         try:
             response_json = extract_json_from_text(response)
             bullet_tags = response_json.get("bullet_tags", [])
         except (json.JSONDecodeError, KeyError, AttributeError):
-            print(f"Warning: Failed to parse bullet tags from JSON response")
+            print(f"Warning: Failed to parse bullet tags from JSON response, falling back to regex")
+            bullet_tags = _extract_bullet_tags_regex(response)
     else:
         # Try to extract from non-JSON response
         # This is a fallback and may not always work
@@ -277,11 +306,12 @@ class ACEContextUpdater:
             tokenizer.decode(ids, skip_special_tokens=True) for ids in reflector_output.batch["responses"]
         ]
 
-        for reflection in reflection_texts:
+        bullet_tags = [_extract_bullet_tags(response, use_json_mode=True) for response in reflection_texts]
+
+        for reflection, tags in zip(reflection_texts, bullet_tags):
             if random.random() < 1/4:
                 print(f"Reflection preview: {reflection}...")
-
-        bullet_tags = [_extract_bullet_tags(response, use_json_mode=True) for response in reflection_texts]
+                print(f"Extracted bullet tags: {tags}")
 
         # Sequentially update the bullet counts
         tags_updated = sum(1 for t in bullet_tags if t)

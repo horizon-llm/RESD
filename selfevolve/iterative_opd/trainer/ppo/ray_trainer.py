@@ -468,6 +468,18 @@ class RayPPOTrainer:
             if wandb.run is not None:
                 wandb.log({"playbook/text": wandb.Html(f"<pre>{playbook}</pre>")}, step=step)
 
+    def _log_teacher_prompt(self, messages: list, step: int):
+        """Log a sample teacher prompt to wandb under self_distillation/teacher_prompt."""
+        if "wandb" in self.config.trainer.logger:
+            import wandb
+            if wandb.run is not None:
+                sample = self.tokenizer.apply_chat_template(
+                    messages[0],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                wandb.log({"self_distillation/teacher_prompt": wandb.Html(f"<pre>{sample}</pre>")}, step=step)
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -657,6 +669,10 @@ class RayPPOTrainer:
             # If feedback_only_without_solution is True, only use feedback when no solution exists
             use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
 
+            use_reflection = reflection_list is not None and reflection_list[i] is not None and self_distillation_cfg.use_reflection_in_teacher_prompt
+
+            use_playbook = self.context_updater.playbook != self.context_updater.get_empty_playbook() and self_distillation_cfg.use_playbook_in_teacher_prompt
+
             # build solution section
             solution_section = ""
             if has_solution:
@@ -672,13 +688,13 @@ class RayPPOTrainer:
                 )
 
             # combine solution and feedback sections
-            if use_feedback or has_solution or (reflection_list is not None and reflection_list[i] is not None):
+            if use_feedback or has_solution or use_reflection or use_playbook:
                 reprompt_text = TEACHER_PROMPT.format(
                     prompt=prompt_texts[i],
                     solution=solution_section,
                     feedback=feedback_section,
-                    reflection=self._remove_thinking_trace(reflection_list[i]) if reflection_list is not None and reflection_list[i] is not None else "",
-                    playbook=self.context_updater.playbook
+                    reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
+                    playbook=self.context_updater.playbook if use_playbook else "",
                 )
             else:
                 reprompt_text = prompt_texts[i]
@@ -689,6 +705,7 @@ class RayPPOTrainer:
 
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
+        self._log_teacher_prompt(messages, self.global_steps)
         enable_thinking = self.config.data.apply_chat_template_kwargs.get("enable_thinking", True) if self.config.data.apply_chat_template_kwargs else True
         teacher_prompt = self.tokenizer.apply_chat_template(
             messages,
@@ -719,6 +736,14 @@ class RayPPOTrainer:
             for i in range(batch_size)
         ]
 
+        use_reflection_in_teacher_prompt = self_distillation_cfg.use_reflection_in_teacher_prompt
+        reflection_used = [
+            reflection_list is not None and reflection_list[i] is not None and use_reflection_in_teacher_prompt
+            for i in range(batch_size)
+        ]
+        use_playbook_in_teacher_prompt = self_distillation_cfg.use_playbook_in_teacher_prompt
+        playbook_used = [self.context_updater.playbook != self.context_updater.get_empty_playbook() and use_playbook_in_teacher_prompt] * batch_size
+
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
         self_distillation_mask = torch.tensor(
             [solution_strs[i] is not None or feedback_used[i] or (reflection_list is not None and reflection_list[i] is not None) for i in range(batch_size)],
@@ -732,13 +757,15 @@ class RayPPOTrainer:
         num_with_feedback_available = sum(1 for f in feedback_list if f is not None)
         num_with_feedback_used = sum(1 for f in feedback_used if f)
         num_with_solution = sum(1 for s in solution_strs if s is not None)
-        num_with_reflection = sum(1 for r in reflection_list if r is not None)
+        num_with_reflection_used = sum(1 for r in reflection_used if r)
+        num_with_playbook_used = sum(1 for p in playbook_used if p)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0]) / len(uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
-            "self_distillation/reflection_used_fraction": num_with_reflection / batch_size,
+            "self_distillation/reflection_used_fraction": num_with_reflection_used / batch_size,
+            "self_distillation/playbook_used_fraction": num_with_playbook_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
             "self_distillation/reprompt_len_mean": reprompt_lens.mean().item(),
             "self_distillation/reprompt_len_max": reprompt_lens.max().item(),
@@ -782,6 +809,22 @@ class RayPPOTrainer:
             assert self.reward_loop_manager is not None, "RewardLoopManager is None"
             batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
+    
+    @staticmethod
+    def _compute_train_batch_metrics(
+        reward_extra_infos_dict: dict[str, list], prefix: str
+    ) -> dict[str, float]:
+        """Compute mean of scalar fields in reward_extra_infos_dict and return under prefix."""
+        metrics = {}
+        for key, values in reward_extra_infos_dict.items():
+            if isinstance(values, list) and len(values) > 0 and isinstance(values[0], str):
+                continue  # skip string fields
+            try:
+                arr = np.array(values, dtype=float)
+                metrics[f"{prefix}/{key}/mean"] = float(np.mean(arr))
+            except (ValueError, TypeError):
+                pass
+        return metrics
 
     def _validate(self, merged: bool = False):
         data_source_lst = []
@@ -820,6 +863,7 @@ class RayPPOTrainer:
             sample_gts.extend(ground_truths)
 
             test_gen_batch = self._get_gen_batch(test_batch)
+            test_gen_batch = self._reformalize_prompts(test_gen_batch)
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
@@ -1781,6 +1825,12 @@ class RayPPOTrainer:
                             reward_tensor = batch.batch["rm_scores"]
                             reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
                             reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+                    
+                    # Log pre-update metrics
+                    if reward_extra_infos_dict:
+                        metrics.update(
+                            self._compute_train_batch_metrics(reward_extra_infos_dict, prefix="train/pre_update")
+                        )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)

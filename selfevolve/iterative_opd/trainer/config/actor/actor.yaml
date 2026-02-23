@@ -127,6 +127,10 @@ self_distillation:
   # This is for the context updater to decide how often to reset the context during training.
   concise_frequency: 4
 
+  use_reflection_in_teacher_prompt: True
+
+  use_playbook_in_teacher_prompt: True
+
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
     {prompt}{solution}{feedback}

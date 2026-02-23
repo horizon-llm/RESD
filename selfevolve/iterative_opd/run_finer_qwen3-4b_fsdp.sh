@@ -45,12 +45,14 @@ export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-32768}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 CONCISE_FREQUENCY=${CONCISE_FREQUENCY:-4}
+use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True}
+use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True}
 
 project_name='iterative_opd_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_reward_count"
+exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
 
 ########################### Sync Results ###########################
 
@@ -94,7 +96,7 @@ DATA=(
     data.train_files=${finer_train_path}
     data.val_files=${finer_val_path}
     data.train_batch_size=${TRAIN_BATCH_SIZE}
-    data.max_prompt_length=32768
+    data.max_prompt_length=49152
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
@@ -123,7 +125,7 @@ ACTOR=(
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
     actor_rollout_ref.actor.self_distillation.concise_frequency=${CONCISE_FREQUENCY}
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=49152
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
 )
 
 ROLLOUT=(
@@ -161,7 +163,7 @@ TRAINER=(
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=4
     trainer.test_freq=4
-    trainer.val_before_train=False
+    trainer.val_before_train=True
 )
 
 ########################### Launch ###########################

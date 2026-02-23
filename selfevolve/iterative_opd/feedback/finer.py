@@ -1,18 +1,114 @@
 import random
 import re
+import json
 
 
-def extract_solution(solution_str):
-    """Extract the answer from <answer>...</answer> tags."""
-    answer_pattern = r"<answer>(.*?)</answer>"
-    match = re.finditer(answer_pattern, solution_str, re.DOTALL)
-    matches = list(match)
+def _remove_thinking_trace(text: str) -> str:
+        """Remove <think>...</think> tags and their content from text."""
+        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
 
-    if len(matches) < 1:
+def _extract_boxed_content(text):
+    """Helper function to extract content from \\boxed{} format"""
+    pattern = r'\\boxed\{'
+    match = re.search(pattern, text)
+    if not match:
         return None
+    
+    start = match.end() - 1  # Position of opening brace
+    brace_count = 0
+    i = start
+    
+    while i < len(text):
+        if text[i] == '{':
+            brace_count += 1
+        elif text[i] == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                return text[start + 1:i]  # Content between braces
+        i += 1
+    return None
 
-    # Return the last match (in case model outputs multiple)
-    return matches[-1].group(1).strip()
+def extract_solution(response):
+    """Extract final answer from model response"""
+
+    # remove thinking trace
+    response = _remove_thinking_trace(response)
+
+    try:
+        # First try JSON parsing
+        parsed = json.loads(response.strip())
+        answer = str(parsed.get("final_answer", "No final answer found"))
+        return answer  
+            
+    except (json.JSONDecodeError, KeyError, AttributeError):
+        answer = None
+
+        # JSON parsing failed, use fallback logic
+        matches = re.findall(r"Finish\[(.*?)\]", response)
+        if matches:
+            answer = matches[-1]
+        
+        if answer is None:
+            # Try to get final answer from JSON style response with regex matching 
+            # Try double quotes first
+            matches = re.findall(r'"final_answer"\s*:\s*"([^"]*)"', response)
+            if matches:
+                answer = matches[-1]
+        
+        if answer is None:
+            # Try single quotes
+            matches = re.findall(r"'final_answer'\s*:\s*'([^']*)'", response)
+            if matches:
+                answer = matches[-1]
+        
+        if answer is None:
+            # Handle JSON format without quotes (for simple expressions)
+            matches = re.findall(r'[\'"]final_answer[\'"]\s*:\s*([^,}]+)', response)
+            if matches:
+                answer = matches[-1].strip()
+                # Clean up trailing characters
+                answer = re.sub(r'[,}]*$', '', answer)
+        
+        if answer is None:
+            # Fallback for "The final answer is: X" pattern with boxed
+            final_answer_pattern = r'[Tt]he final answer is:?\s*\$?\\boxed\{'
+            match = re.search(final_answer_pattern, response)
+            if match:
+                # Extract boxed content starting from this match
+                remaining_text = response[match.start():]
+                boxed_content = _extract_boxed_content(remaining_text)
+                answer = boxed_content
+        
+        if answer is None:
+            # More general pattern for "final answer is X"
+            matches = re.findall(r'[Tt]he final answer is:?\s*([^\n.]+)', response)
+            if matches:
+                answer = matches[-1].strip()
+                # Clean up common formatting
+                answer = re.sub(r'^\$?\\boxed\{([^}]+)\}\$?$', r'\1', answer)
+                answer = answer.replace('$', '').strip()
+        
+        if answer is not None:
+            answer_pattern = r"<answer>(.*?)</answer>"
+            match = re.finditer(answer_pattern, answer, re.DOTALL)
+            matches = list(match)
+
+            if len(matches) < 1:
+                return answer.strip()
+
+            # Return the last match (in case model outputs multiple)
+            return matches[-1].group(1).strip()
+        else:
+            # extract from the entire response as a last resort
+            answer_pattern = r"<answer>(.*?)</answer>"
+            match = re.finditer(answer_pattern, response, re.DOTALL)
+            matches = list(match)
+
+            if len(matches) < 1:
+                return None
+
+            # Return the last match (in case model outputs multiple)
+            return matches[-1].group(1).strip()
 
 def finer_tag_score(predicted, ground_truth):
     """Compute partial credit score for FiNER tag matching.
