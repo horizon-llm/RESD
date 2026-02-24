@@ -21,10 +21,11 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
+NUM_DATA=32  # Use -1 to indicate using the full dataset (no subsampling)
 
-python selfevolve/sdpo/preprocess.py --data_source selfevolve/sdpo/datasets/sciknoweval/chemistry
+python selfevolve/sdpo_fewshot/preprocess.py --data_source selfevolve/sdpo/datasets/sciknoweval/chemistry --num_data $NUM_DATA
 
-finer_train_path=selfevolve/sdpo/datasets/sciknoweval/chemistry/train.parquet
+finer_train_path=selfevolve/sdpo/datasets/sciknoweval/chemistry/train_${NUM_DATA}.parquet
 finer_val_path=selfevolve/sdpo/datasets/sciknoweval/chemistry/test.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
@@ -39,17 +40,17 @@ EMA_WEIGHT=${EMA_WEIGHT:-0.05}
 TASK=chemistry
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
+NUM_EPOCHS=${NUM_EPOCHS:-90}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 ENABLE_THINKING=${ENABLE_THINKING:-False}
 VAL_ROLLOUT_N=${VAL_ROLLOUT_N:-16}
-INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-False}
+INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-True}
 SHUFFLE=${SHUFFLE:-True}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 
-project_name='sdpo_chemistry'
-exp_name="qwen3_8b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}_distk${DISTILLATION_TOPK}"
+project_name='sdpo_fewshot_chemistry'
+exp_name="qwen3_8b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}_distk${DISTILLATION_TOPK}"
 
 ########################### Sync Results ###########################
 
@@ -99,7 +100,7 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=${SHUFFLE}
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/mcq.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/mcq.py
     custom_reward_function.name=compute_score
 )
 
@@ -131,7 +132,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=${VAL_ROLLOUT_N}
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
     actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
@@ -164,7 +165,7 @@ TRAINER=(
 
 ########################### Launch ###########################
 
-"$PYTHON" -m selfevolve.sdpo_migrate.trainer.main_ppo \
+"$PYTHON" -m selfevolve.sdpo_fewshot.trainer.main_ppo \
     --config-name=${CONFIG_NAME} \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \

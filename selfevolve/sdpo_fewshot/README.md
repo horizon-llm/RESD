@@ -8,3 +8,8 @@
     1. teacher/student model before training
     2. teacher/student model RL
     3. SDPO w/ env feedback
+* Evaluation:
+    * Model-specific Error Case:
+        Cluster existing error cases
+    * Behavior Injection
+        Candidate behaviors include: output style, safety/privary/security, knowledge

@@ -481,6 +481,18 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _log_teacher_prompt(self, messages: list, step: int):
+        """Log a sample teacher prompt to wandb under self_distillation/teacher_prompt."""
+        if "wandb" in self.config.trainer.logger:
+            import wandb
+            if wandb.run is not None:
+                sample = self.tokenizer.apply_chat_template(
+                    messages[0],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                wandb.log({"self_distillation/teacher_prompt": wandb.Html(f"<pre>{sample}</pre>")}, step=step)
+
     def _compute_reward_legacy(
         self,
         batch: DataProto,
@@ -658,6 +670,7 @@ class RayPPOTrainer:
 
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
+        self._log_teacher_prompt(messages, self.global_steps)
         enable_thinking = self.config.data.apply_chat_template_kwargs.get("enable_thinking", True) if self.config.data.apply_chat_template_kwargs else True
         teacher_prompt = self.tokenizer.apply_chat_template(
             messages,
@@ -711,6 +724,22 @@ class RayPPOTrainer:
             "teacher_position_ids": teacher_position_ids,
             "self_distillation_mask": self_distillation_mask,
         }), metrics
+
+    @staticmethod
+    def _compute_train_batch_metrics(
+        reward_extra_infos_dict: dict[str, list], prefix: str
+    ) -> dict[str, float]:
+        """Compute mean of scalar fields in reward_extra_infos_dict and return under prefix."""
+        metrics = {}
+        for key, values in reward_extra_infos_dict.items():
+            if isinstance(values, list) and len(values) > 0 and isinstance(values[0], str):
+                continue  # skip string fields
+            try:
+                arr = np.array(values, dtype=float)
+                metrics[f"{prefix}/{key}/mean"] = float(np.mean(arr))
+            except (ValueError, TypeError):
+                pass
+        return metrics
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
@@ -1678,6 +1707,11 @@ class RayPPOTrainer:
                             reward_tensor = batch.batch["rm_scores"]
                             reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
                             reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+
+                    if reward_extra_infos_dict:
+                        metrics.update(
+                            self._compute_train_batch_metrics(reward_extra_infos_dict, prefix="train/pre_update")
+                        )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)

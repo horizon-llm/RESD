@@ -21,14 +21,19 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
+NUM_DATA=32
 
-python selfevolve/sdpo_migrate/prepare_finer_dataset.py \
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
-               selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
-        --output data/finer/train.parquet data/finer/val.parquet
+        --num_data $NUM_DATA \
+        --output data/finer/train_${NUM_DATA}.parquet
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
+        --task_name finer \
+        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
+        --output data/finer/val.parquet
 
-finer_train_path=data/finer/train.parquet
+finer_train_path=data/finer/train_${NUM_DATA}.parquet
 finer_val_path=data/finer/val.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
@@ -43,14 +48,14 @@ EMA_WEIGHT=${EMA_WEIGHT:-0.05}
 TASK=finer
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
+NUM_EPOCHS=${NUM_EPOCHS:-90}
 CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 
-project_name='sdpo_finer'
-exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_reward_count"
+project_name='sdpo_fewshot_finer'
+exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -99,7 +104,7 @@ DATA=(
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
-    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/finer.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
     custom_reward_function.name=compute_score_count
     +custom_reward_function.reward_kwargs.correctness_feedback=${CORRECTNESS_FEEDBACK}
 )
@@ -163,7 +168,7 @@ TRAINER=(
 
 ########################### Launch ###########################
 
-"$PYTHON" -m selfevolve.sdpo_migrate.trainer.main_ppo \
+"$PYTHON" -m selfevolve.sdpo_fewshot.trainer.main_ppo \
     --config-name=${CONFIG_NAME} \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
