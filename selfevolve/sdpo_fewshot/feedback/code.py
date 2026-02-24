@@ -22,7 +22,6 @@ OUTER_ERROR_PREFIX = "ERROR: "
 MAX_ADDITIONAL_MEMORY_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_TIMEOUT = 1
 TIMEOUT_SCALER = 1.0
-MAX_CONCURRENT_TESTS = 4  # max child processes running simultaneously per solution
 FORMAT_PENALTY = False
 
 FILENAME = "Solution.py"
@@ -746,7 +745,7 @@ def format_test_feedback(
     return result
 
 
-def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases, max_workers=None):
+def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases):
     completion = extract_code(solution)
     if completion is None:
         return [{
@@ -761,74 +760,64 @@ def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases, max_wo
 
     num_test_cases = min(max_test_cases, len(test_cases["inputs"])) if max_test_cases else len(test_cases["inputs"])
     timeout_per_test_case = float(test_cases["time_limit"]) if test_cases["time_limit"] is not None else DEFAULT_TIMEOUT
-    if max_workers is None:
-        max_workers = MAX_CONCURRENT_TESTS
-
-    num_batches = (num_test_cases + max_workers - 1) // max_workers
-    print(f"[run_tests] total={num_test_cases} test cases, max_workers={max_workers}, batches={num_batches}, timeout={timeout_per_test_case}s/test")
 
     records = []
+    process_data = []
 
-    for batch_start in range(0, num_test_cases, max_workers):
-        batch_indices = range(batch_start, min(batch_start + max_workers, num_test_cases))
-        batch_num = batch_start // max_workers + 1
-        print(f"[run_tests] batch {batch_num}/{num_batches}: running tests {batch_indices.start}-{batch_indices.stop - 1} ({len(batch_indices)} parallel)")
-        process_data = []
+    for test_idx in range(num_test_cases):
+        parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+        p = multiprocessing.Process(target=run_tests_for_one_example, args=(test_cases, completion, child_conn, sparse_rewards, test_idx))
+        p.start()
+        child_conn.close()  # Close in parent to avoid resource leaks
+        process_data.append({"process": p, "parent_conn": parent_conn})
 
-        for test_idx in batch_indices:
-            parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
-            p = multiprocessing.Process(target=run_tests_for_one_example, args=(test_cases, completion, child_conn, sparse_rewards, test_idx))
-            p.start()
-            child_conn.close()  # Close in parent to avoid resource leaks
-            process_data.append({"process": p, "parent_conn": parent_conn})
+    start_time = time.time()
+    for test_idx, data in enumerate(process_data):
+        p = data["process"]
+        parent_conn = data["parent_conn"]
 
-        batch_start_time = time.time()
-        for test_idx, data in zip(batch_indices, process_data):
-            p = data["process"]
-            parent_conn = data["parent_conn"]
-
-            # timeout for a single test; since all tests in the batch have started in parallel,
-            # calculate remaining time relative to batch start
-            timeout_this_test = max(0, timeout_per_test_case * TIMEOUT_SCALER + 1 - (time.time() - batch_start_time))
-            if parent_conn.poll(timeout_this_test):
-                try:
-                    result = parent_conn.recv()
-                except Exception as e:
-                    # any other error (eg process died without sending a result)
-                    result = {
-                        "test_idx": test_idx,
-                        "input": test_cases["inputs"][test_idx],
-                        "expected": test_cases["outputs"][test_idx],
-                        "actual": f"Process Error: {_short_trace(e)}",
-                        "passed": False,
-                        "debug": "",
-                        "time": float("inf"),
-                    }
-            else:
-                # process timed out
+        # timeout for a single test; since all tests have started in parallel, we need to calculate the remaining time for each test
+        timeout_this_test = max(0, timeout_per_test_case * TIMEOUT_SCALER + 1 - (time.time() - start_time))
+        if parent_conn.poll(timeout_this_test):
+            try:
+                # receive the result from the child process
+                result = parent_conn.recv()
+            except Exception as e:
+                # any other error (eg process died without sending a result)
                 result = {
                     "test_idx": test_idx,
                     "input": test_cases["inputs"][test_idx],
                     "expected": test_cases["outputs"][test_idx],
-                    "actual": TIMEOUT,
+                    "actual": f"Process Error: {_short_trace(e)}",
                     "passed": False,
                     "debug": "",
                     "time": float("inf"),
                 }
+        else:
+            # process timed out
+            result = {
+                "test_idx": test_idx,
+                "input": test_cases["inputs"][test_idx],
+                "expected": test_cases["outputs"][test_idx],
+                "actual": TIMEOUT,
+                "passed": False,
+                "debug": "",
+                "time": float("inf"),
+            }
 
-            records.append(result)
+        records.append(result)
 
-            # clean-up process
-            p.join(timeout=0)
-            if p.is_alive():
-                p.kill()
-                p.join()
+        # clean-up process
+        p.join(timeout=0)
+        if p.is_alive():
+            p.kill()
+            p.join()
 
     assert len(records) == num_test_cases
     return records
 
 
-def compute_score(solution_str: str, ground_truth: str, extra_info = None, sparse_rewards=False, max_test_cases=None, max_workers=None, **kwargs):
+def compute_score(solution: str, ground_truth: str, extra_info = None, sparse_rewards=False, max_test_cases=None):
     split = extra_info["split"]
     was_truncated = extra_info.get("truncated", False)
 
@@ -851,7 +840,7 @@ def compute_score(solution_str: str, ground_truth: str, extra_info = None, spars
             "feedback": "Failed to parse ground truth test cases.",
         }
 
-    records = run_tests(test_cases=test_cases, solution=solution_str, sparse_rewards=sparse_rewards, max_test_cases=max_test_cases if split != "test" else None, max_workers=max_workers)
+    records = run_tests(test_cases=test_cases, solution=solution, sparse_rewards=sparse_rewards, max_test_cases=max_test_cases if split != "test" else None)
 
     correct_answers = [1.0 if r["passed"] else 0.0 for r in records]
     predictions = str([r["actual"] for r in records])[-5000:]

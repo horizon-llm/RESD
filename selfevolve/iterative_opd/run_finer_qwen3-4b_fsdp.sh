@@ -21,7 +21,7 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=-1
+NUM_DATA=${NUM_DATA:--1} # Use -1 to indicate using the full dataset; otherwise, specify the number of samples to use for training (e.g., 1000)
 
 python selfevolve/iterative_opd/prepare_finer_dataset.py \
         --task_name finer \
@@ -53,11 +53,13 @@ CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 CONCISE_FREQUENCY=${CONCISE_FREQUENCY:-4}
+MAX_BULLETS=${MAX_BULLETS:-null}
+CONCISE_METHOD=${CONCISE_METHOD:-reset}
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True}
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True}
 
 project_name='iterative_opd_finer'
-exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
+exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_concise${CONCISE_FREQUENCY}_maxb${MAX_BULLETS}_cmethod${CONCISE_METHOD}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
 
 ########################### Sync Results ###########################
 
@@ -130,6 +132,8 @@ ACTOR=(
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
     actor_rollout_ref.actor.self_distillation.concise_frequency=${CONCISE_FREQUENCY}
+    actor_rollout_ref.actor.self_distillation.max_bullets=${MAX_BULLETS}
+    actor_rollout_ref.actor.self_distillation.concise_method=${CONCISE_METHOD}
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
 )
 

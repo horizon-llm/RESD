@@ -22,35 +22,35 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="sdpo"
 
-python selfevolve/sdpo/preprocess.py --data_source selfevolve/sdpo/datasets/lcb_v6
+python selfevolve/sdpo_migrate/prepare_finer_dataset.py \
+        --task_name finer \
+        --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
+               selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
+        --output data/finer/train.parquet data/finer/val.parquet
 
-finer_train_path=selfevolve/sdpo/datasets/lcb_v6/train.parquet
-finer_val_path=selfevolve/sdpo/datasets/lcb_v6/test.parquet
+finer_train_path=data/finer/train.parquet
+finer_val_path=data/finer/val.parquet
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
 TRAIN_BATCH_SIZE=32
 ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
-LR=${LR:-1e-6}
+LR=${LR:-1e-5}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
-ALPHA=${ALPHA:-1.0}
-EMA_WEIGHT=${EMA_WEIGHT:-0.01}
-TASK=lcb_v6
+ALPHA=${ALPHA:-0.5}
+EMA_WEIGHT=${EMA_WEIGHT:-0.05}
+TASK=finer
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
+CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
-ENABLE_THINKING=${ENABLE_THINKING:-True}
-VAL_ROLLOUT_N=${VAL_ROLLOUT_N:-1}
-INCLUDE_ENVIRONMENT_FEEDBACK=${INCLUDE_ENVIRONMENT_FEEDBACK:-True}
-SHUFFLE=${SHUFFLE:-True}
-DISTILLATION_TOPK=${DISTILLATION_TOPK:-20}
-MAX_WORKERS=${MAX_WORKERS:-16}
+DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 
-project_name='sdpo_lcb_v6'
-exp_name="qwen3_8b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_think${ENABLE_THINKING}_envfb${INCLUDE_ENVIRONMENT_FEEDBACK}_shuffle${SHUFFLE}_distk${DISTILLATION_TOPK}"
+project_name='sdpo_finer'
+exp_name="qwen3_4b_fsdp_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_clip${CLIP_ADV_HIGH}_dross${DONTS_REPROMPT_ON_SELF_SUCCESS}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -98,15 +98,14 @@ DATA=(
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
-    data.shuffle=${SHUFFLE}
-    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/code.py
-    custom_reward_function.name=compute_score
-    +custom_reward_function.reward_kwargs.max_workers=${MAX_WORKERS}
+    data.shuffle=False
+    custom_reward_function.path=selfevolve/sdpo_migrate/feedback/finer.py
+    custom_reward_function.name=compute_score_count
+    +custom_reward_function.reward_kwargs.correctness_feedback=${CORRECTNESS_FEEDBACK}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-8B
+    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 
@@ -114,31 +113,29 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr=$LR
     actor_rollout_ref.actor.ppo_mini_batch_size=32
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
-    actor_rollout_ref.actor.optim.lr_warmup_steps=0
+    actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.self_distillation.distillation_topk=${DISTILLATION_TOPK}
+    actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
-    actor_rollout_ref.actor.self_distillation.include_environment_feedback=${INCLUDE_ENVIRONMENT_FEEDBACK}
 )
 
 ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.n=$ROLLOUT_BATCH_SIZE
-    actor_rollout_ref.rollout.val_kwargs.n=${VAL_ROLLOUT_N}
+    actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.35
     actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
 )
 
 REF=(

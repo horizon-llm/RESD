@@ -10,7 +10,7 @@ from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
 from .prompts import REFLECTOR_PROMPT, CURATOR_PROMPT
-from .playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats, extract_json_from_text, apply_curator_operations
+from .playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats, extract_json_from_text, apply_curator_operations, parse_playbook_line
 
 
 def _remove_thinking_trace(text: str) -> str:
@@ -225,6 +225,7 @@ class ACEContextUpdater:
 
         self.playbook = self.get_empty_playbook()
         self.next_global_id = 1
+        self.context_update_count = 0
     
     @staticmethod
     def get_empty_playbook() -> str:
@@ -243,30 +244,115 @@ class ACEContextUpdater:
 
 ## OTHERS"""
 
-    def _concise_playbook(self, playbook: str) -> str:
+    def _concise_playbook(
+        self,
+        playbook: str,
+        max_bullets: int = None,
+        concise_method: str = "reset",
+    ) -> str:
         """
-        Concise the playbook
+        Concise the playbook to at most max_bullets entries.
 
         Args:
             playbook: The current playbook content
+            max_bullets: Target maximum number of bullets to keep.
+                If None (e.g. triggered only by frequency), helpful bullets
+                are not randomly truncated — only unused and harmful ones are removed.
+            concise_method: Strategy to use for reduction:
+                - "reset": discard everything and return a blank playbook (original behaviour)
+                - "prioritized": remove unused → harmful → randomly truncate helpful
         Returns:
             Concised playbook content
         """
-        # dummy concise for now
-        self.playbook = self.get_empty_playbook()
-        return self.playbook
+        if concise_method == "reset":
+            return self.get_empty_playbook()
+
+        # ------------------------------------------------------------------
+        # "prioritized" method
+        # ------------------------------------------------------------------
+
+        lines = playbook.strip().split('\n')
+
+        # Categorise every bullet
+        unused_ids: set = set()
+        harmful_ids: set = set()
+        helpful_ids: list = []  # ordered list so random.sample is stable
+
+        for line in lines:
+            parsed = parse_playbook_line(line)
+            if not parsed:
+                continue
+            bid = parsed['id']
+            h, harm = parsed['helpful'], parsed['harmful']
+            if h + harm == 0:
+                unused_ids.add(bid)
+            elif harm >= h and harm > 0:
+                harmful_ids.add(bid)
+            else:
+                helpful_ids.append(bid)
+
+        print(f"[ACE] Concising playbook (method={concise_method}) — "
+              f"unused={len(unused_ids)}, harmful={len(harmful_ids)}, "
+              f"helpful={len(helpful_ids)}, limit={max_bullets}")
+
+        ids_to_remove: set = unused_ids | harmful_ids
+
+        # Randomly truncate helpful bullets if still over the limit
+        dropped_helpful: set = set()
+        if max_bullets is not None:
+            n_helpful_to_drop = max(0, len(helpful_ids) - max_bullets)
+            if n_helpful_to_drop > 0:
+                dropped_helpful = set(random.sample(helpful_ids, n_helpful_to_drop))
+                ids_to_remove |= dropped_helpful
+                print(f"[ACE] Randomly dropping {n_helpful_to_drop} helpful bullets "
+                      f"to fit within limit of {max_bullets}")
+
+        # Rebuild playbook, skipping removed bullets and collapsing extra blank lines
+        new_lines = []
+        prev_blank = False
+        for line in lines:
+            parsed = parse_playbook_line(line)
+            if parsed and parsed['id'] in ids_to_remove:
+                continue
+            is_blank = not line.strip()
+            if is_blank and prev_blank:
+                continue
+            new_lines.append(line)
+            prev_blank = is_blank
+
+        print(f"[ACE] Playbook concised: removed {len(ids_to_remove)} bullets "
+              f"({len(unused_ids)} unused, {len(harmful_ids)} harmful, "
+              f"{len(dropped_helpful)} helpful truncated)")
+
+        return '\n'.join(new_lines)
 
     def update(self, batch: DataProto, async_rollout_manager, tokenizer, feedback_list: List[str]):
         batch_size = batch.batch["input_ids"].shape[0]
         print(f"[ACE] Starting context update for {batch_size} samples "
               f"(playbook bullets: {self.next_global_id - 1})")
 
-        # concise the playbook after a few gradient steps
+        # Concise the playbook when triggered by frequency or bullet-count limit
         self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
-        concise_frequency = self_distillation_cfg.concise_frequency if self_distillation_cfg else None
-        if concise_frequency and (self.next_global_id-1) % concise_frequency == 0:
-            print(f"[ACE] Concising playbook (frequency={concise_frequency})...")
-            self.playbook = self._concise_playbook(self.playbook)
+        concise_frequency = getattr(self_distillation_cfg, "concise_frequency", None) if self_distillation_cfg else None
+        max_bullets = getattr(self_distillation_cfg, "max_bullets", None) if self_distillation_cfg else None
+        concise_method = getattr(self_distillation_cfg, "concise_method", "reset") if self_distillation_cfg else "reset"
+
+        current_stats = get_playbook_stats(self.playbook)
+        frequency_trigger = concise_frequency and self.context_update_count % concise_frequency == 0
+        limit_trigger = max_bullets and current_stats['total_bullets'] > max_bullets
+
+        if not concise_frequency and not max_bullets:
+            print(f"[ACE] No concise_frequency or max_bullets set, skipping playbook concising")
+        elif frequency_trigger or limit_trigger:
+            reasons = []
+            if frequency_trigger:
+                reasons.append(f"frequency={concise_frequency}")
+            if limit_trigger:
+                reasons.append(f"bullets={current_stats['total_bullets']} > limit={max_bullets}")
+            print(f"[ACE] Concising playbook (reason: {', '.join(reasons)}, method={concise_method})...")
+            # Pass max_bullets only when the limit triggered — frequency-only runs skip helpful truncation
+            effective_max = max_bullets if limit_trigger else None
+            self.playbook = self._concise_playbook(self.playbook, effective_max, concise_method)
 
         # get response texts
         responses = batch.batch["responses"]
@@ -395,6 +481,7 @@ class ACEContextUpdater:
             self.playbook, self.next_global_id = apply_curator_operations(
                 self.playbook, all_operations, self.next_global_id
             )
+        self.context_update_count += 1
         final_stats = get_playbook_stats(self.playbook)
         print(f"[ACE] Playbook updated: {len(all_operations)} operations applied, "
               f"total_bullets={final_stats['total_bullets']}, "
