@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-"checkpoints"}
+CHECKPOINT_PATH=${1:-${CHECKPOINT_PATH:-"checkpoints"}}
 TOKENIZER_NAME=${TOKENIZER_NAME:-"Qwen/Qwen3-4B"}
 DUMP_DIR="$CHECKPOINT_PATH/token_loss_dumps"
 

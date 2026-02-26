@@ -53,9 +53,10 @@ CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
+ENABLE_THINKING=False
 
 project_name='sdpo_fewshot_finer'
-exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_reward_count"
+exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_reward_count"
 
 ########################### Sync Results ###########################
 
@@ -104,13 +105,14 @@ DATA=(
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
+    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
     custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
     custom_reward_function.name=compute_score_count
     +custom_reward_function.reward_kwargs.correctness_feedback=${CORRECTNESS_FEEDBACK}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
+    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Instruct-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 

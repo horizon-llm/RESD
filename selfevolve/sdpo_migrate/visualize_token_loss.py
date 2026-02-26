@@ -29,13 +29,50 @@ import torch
 
 FIELD_REGISTRY = {
     "token_distill_loss": {"label": "Distillation Loss (per token)", "cmap": "sequential"},
-    "teacher_log_prob": {"label": "Log Prob (teacher)", "cmap": "sequential"},
-    "log_prob": {"label": "Log Prob (student)", "cmap": "sequential"},
+    "log_ratio": {"label": "Advantage log p_teacher/p_student", "cmap": "diverging"},
+    "student_entropy": {"label": "Entropy (student)", "cmap": "sequential"},
+    "teacher_entropy": {"label": "Entropy (teacher)", "cmap": "sequential"},
 }
 
 
 def load_dump(path: str) -> dict:
     return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def _compute_entropy_from_topk(topk_logps: torch.Tensor) -> torch.Tensor:
+    """Compute approximate per-token entropy from top-k log probs.
+
+    Args:
+        topk_logps: Tensor of shape (n, seq_len, k) containing log probs of top-k tokens.
+    Returns:
+        Tensor of shape (n, seq_len) with approximate entropy at each position.
+    """
+    # Renormalize over the top-k subset so probabilities sum to 1
+    logps = topk_logps - torch.logsumexp(topk_logps, dim=-1, keepdim=True)
+    probs = torch.exp(logps)
+    return -(probs * logps).sum(dim=-1)
+
+
+def _preprocess_dump(dump: dict) -> dict:
+    """Return a new dump dict with derived fields added.
+
+    - Converts ``log_prob`` and ``teacher_log_prob`` from log-space to actual
+      probabilities via exp().
+    - Adds ``student_entropy`` / ``teacher_entropy`` computed from top-k logps
+      when available.
+    """
+    dump = dict(dump)  # shallow copy — avoid mutating the original
+    # Compute log ratio before converting to prob space
+    if "teacher_log_prob" in dump and "log_prob" in dump:
+        dump["log_ratio"] = dump["teacher_log_prob"] - dump["log_prob"]
+    # Convert log probs to probs for use in tooltips
+    for key in ("log_prob", "teacher_log_prob"):
+        if key in dump:
+            dump[key] = torch.exp(dump[key])
+    for prefix, topk_key in [("student", "student_topk_logps"), ("teacher", "teacher_topk_logps")]:
+        if topk_key in dump:
+            dump[f"{prefix}_entropy"] = _compute_entropy_from_topk(dump[topk_key])
+    return dump
 
 
 def get_default_fields(dump: dict) -> list[str]:
@@ -359,16 +396,16 @@ document.addEventListener('click', function(e) {{
     popup.className = 'topk-popup';
     var selectedTok = el.textContent;
     var h = '<div class="topk-title">Top-' + data.length + ' tokens</div>';
-    h += '<table><tr><th>#</th><th>Token</th><th>Student LP</th>';
-    if (data[0] && data[0][2] !== null) h += '<th>Teacher LP</th>';
+    h += '<table><tr><th>#</th><th>Token</th><th>Student Prob</th>';
+    if (data[0] && data[0][2] !== null) h += '<th>Teacher Prob</th>';
     h += '</tr>';
     for (var i = 0; i < data.length; i++) {{
         var tok = data[i][0], slp = data[i][1], tlp = data[i][2];
         var cls = (tok === selectedTok) ? ' class="topk-selected"' : '';
         h += '<tr' + cls + '><td>' + (i+1) + '</td>';
         h += '<td>' + tok.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</td>';
-        h += '<td>' + slp.toFixed(4) + '</td>';
-        if (tlp !== null) h += '<td>' + tlp.toFixed(4) + '</td>';
+        h += '<td>' + Math.exp(slp).toFixed(6) + '</td>';
+        if (tlp !== null) h += '<td>' + Math.exp(tlp).toFixed(6) + '</td>';
         h += '</tr>';
     }}
     h += '</table>';
@@ -399,12 +436,12 @@ HTML_FOOTER = """\
 def _extra_tooltip_for(field: str, dump: dict, sample_idx: int) -> dict[str, torch.Tensor]:
     """Return extra per-token tensors to show on hover for a given field."""
     extra = {}
-    # For distillation loss, show student and teacher log probs
-    if field == "token_distill_loss":
+    # For distillation loss and log ratio, show student and teacher probs (already converted from log-space)
+    if field in ("token_distill_loss", "log_ratio"):
         if "log_prob" in dump:
-            extra["student_lp"] = dump["log_prob"][sample_idx]
+            extra["student_prob"] = dump["log_prob"][sample_idx]
         if "teacher_log_prob" in dump:
-            extra["teacher_lp"] = dump["teacher_log_prob"][sample_idx]
+            extra["teacher_prob"] = dump["teacher_log_prob"][sample_idx]
     return extra
 
 
@@ -412,6 +449,7 @@ def _extra_tooltip_for(field: str, dump: dict, sample_idx: int) -> dict[str, tor
 
 def build_html(dump: dict, tokenizer, fields: list[str] | None = None, title: str = "") -> str:
     """Build the full HTML visualization for a single dump file."""
+    dump = _preprocess_dump(dump)
     n_samples = dump["response_ids"].shape[0]
     response_len = dump["response_ids"].shape[1]
     input_ids = dump["input_ids"]
@@ -548,7 +586,7 @@ def main():
         "--field",
         type=str,
         default=None,
-        help="Field to visualize (token_distill_loss, teacher_log_prob, log_prob). "
+        help="Field to visualize (token_distill_loss, log_ratio, student_entropy, teacher_entropy). "
         "Default: all available fields.",
     )
     parser.add_argument("--out", type=str, default=None, help="Output HTML path (default: auto)")

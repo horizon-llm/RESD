@@ -863,10 +863,27 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
+
+                        remove_thinking_in_loss = self_distillation_cfg.get("remove_thinking_in_loss", False)
+                        if remove_thinking_in_loss:
+                            end_think_token_id = data.meta_info.get("end_think_token_id", None)
+                            if end_think_token_id is None:
+                                raise ValueError("end_think_token_id must be provided in data.meta_info when remove_thinking_in_loss is enabled.")
+                            # response_mask: (bsz, response_length)
+                            # model_inputs["responses"]: (bsz, response_length)
+                            is_end_think = model_inputs["responses"] == end_think_token_id  # (bsz, response_length), bool
+                            after_think  = is_end_think.long().cumsum(dim=-1) >= 1         # True at and after </think>
+                            distill_response_mask = (after_think & ~is_end_think).long() * response_mask # answer only
+                            micro_batch_metrics["self_distillation/answer_token_fraction"] = (
+                                distill_response_mask.sum().float() / response_mask.sum().float().clamp(min=1)
+                            ).item()
+                        else:
+                            distill_response_mask = response_mask
+                            micro_batch_metrics["self_distillation/answer_token_fraction"] = 1.0
                         pg_loss, pg_metrics = compute_self_distillation_loss(
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,
-                            response_mask=response_mask,
+                            response_mask=distill_response_mask,
                             self_distillation_config=self_distillation_cfg,
                             old_log_probs=old_log_prob,
                             student_all_log_probs=student_all_logps,
@@ -928,6 +945,8 @@ class DataParallelPPOActor(BasePPOActor):
                             dump_data["teacher_input_ids"] = model_inputs["teacher_input_ids"][:n].detach().cpu()
                         if self_distillation_mask is not None:
                             dump_data["self_distillation_mask"] = self_distillation_mask[:n].detach().cpu()
+                        if distill_response_mask is not response_mask:
+                            dump_data["distill_response_mask"] = distill_response_mask[:n].detach().cpu()
                         if student_topk_indices is not None:
                             dump_data["topk_indices"] = student_topk_indices[:n].detach().cpu()
                         if student_topk_logps is not None:

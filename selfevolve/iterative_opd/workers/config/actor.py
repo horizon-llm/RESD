@@ -48,6 +48,9 @@ class SelfDistillationConfig(BaseConfig):
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
         solution_template (str): Template for formatting solution section. Uses {successful_previous_attempt} placeholder.
         feedback_template (str): Template for formatting feedback section. Uses {feedback_raw} placeholder.
+        concise_frequency (int): How often (in context-update steps) to trigger playbook concising.
+        max_bullets (Optional[int]): Hard cap on playbook bullet count; triggers concising when exceeded.
+        concise_method (str): Strategy for concising: "reset" clears the playbook; "prioritized" removes unused/harmful bullets first.
         include_environment_feedback (bool): Whether to include environment feedback in reprompting for wrong attempts.
         environment_feedback_only_without_solution (bool): If True, only use feedback when no solution is available (ignore feedback when solution exists).
         reprompt_template_feedback (str): Template for reprompting with feedback but no solution.
@@ -67,8 +70,11 @@ class SelfDistillationConfig(BaseConfig):
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
     concise_frequency: int = 4
+    max_bullets: Optional[int] = None
+    concise_method: str = "reset"
     use_reflection_in_teacher_prompt: bool = True
     use_playbook_in_teacher_prompt: bool = True
+    
     reprompt_template: str = (
         "{prompt}{solution}{feedback}\n\n"
         "Correctly solve the original question.\n"

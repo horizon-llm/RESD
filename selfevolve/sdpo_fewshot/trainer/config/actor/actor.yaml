@@ -124,6 +124,9 @@ self_distillation:
   # IS clip for loss; null disables IS weighting
   is_clip: 2
 
+  # Whether to remove <think>...</think> tokens from the loss calculation
+  remove_thinking_in_loss: False
+
   # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
   reprompt_template: |-
     {prompt}{solution}{feedback}
