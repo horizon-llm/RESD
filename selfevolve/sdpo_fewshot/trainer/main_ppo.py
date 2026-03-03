@@ -367,8 +367,16 @@ class TaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
+        use_stream = config.trainer.get("use_stream_trainer", False)
+        if use_stream:
+            from ..trainer.ppo.stream_trainer import StreamRayPPOTrainer
+
+            trainer_cls = StreamRayPPOTrainer
+        else:
+            trainer_cls = RayPPOTrainer
+        
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

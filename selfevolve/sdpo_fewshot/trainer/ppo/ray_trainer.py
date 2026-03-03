@@ -569,8 +569,11 @@ class RayPPOTrainer:
     
     @staticmethod
     def _remove_thinking_trace(text: str) -> str:
-        """Remove <think>...</think> tags and their content from text."""
-        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 1: complete <think>...</think> block in response
+        out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 2: <think> was in the prompt, response starts with thinking content
+        out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+        return out_text
     
     def _get_solution(
         self,
@@ -618,6 +621,14 @@ class RayPPOTrainer:
             batch_size=batch_size,
         )
 
+        # Extract teacher feedback if available and include_teacher_feedback is enabled
+        teacher_feedback_list: list[Any] = [None] * batch_size
+        if self_distillation_cfg.get("include_teacher_feedback", False) and reward_extra_infos_dict is not None:
+            raw_teacher_feedback = reward_extra_infos_dict.get("teacher_feedback", [])
+            for i in range(min(len(raw_teacher_feedback), batch_size)):
+                if raw_teacher_feedback[i] and isinstance(raw_teacher_feedback[i], str) and raw_teacher_feedback[i].strip():
+                    teacher_feedback_list[i] = raw_teacher_feedback[i]
+
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
         solution_strs = [
             self._get_solution(
@@ -635,10 +646,21 @@ class RayPPOTrainer:
             system_messages = batch.non_tensor_batch["raw_prompt"][i][:-1]
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
+            has_teacher_feedback = teacher_feedback_list[i] is not None
+            include_previous_attempt = self_distillation_cfg.get("include_previous_attempt", False)
             feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
+            teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
 
             # If feedback_only_without_solution is True, only use feedback when no solution exists
             use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
+            use_teacher_feedback = has_teacher_feedback and (not teacher_feedback_only_without_solution or not has_solution)
+
+            # build previous attempt section (only when feedback or teacher feedback is present)
+            previous_attempt_section = ""
+            if include_previous_attempt and (use_feedback or use_teacher_feedback):
+                previous_attempt_section = self_distillation_cfg.previous_attempt_template.format(
+                    previous_attempt_raw=response_texts[i]
+                )
 
             # build solution section
             solution_section = ""
@@ -654,12 +676,21 @@ class RayPPOTrainer:
                     feedback_raw=feedback_list[i]
                 )
 
-            # combine solution and feedback sections
-            if use_feedback or has_solution:
+            # build teacher feedback section (independent of env feedback)
+            teacher_feedback_section = ""
+            if use_teacher_feedback:
+                teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
+                    teacher_feedback_raw=teacher_feedback_list[i]
+                )
+
+            # combine all sections into the reprompt
+            if use_feedback or use_teacher_feedback or has_solution:
                 reprompt_text = self_distillation_cfg.reprompt_template.format(
                     prompt=prompt_texts[i],
+                    previous_attempt=previous_attempt_section,
                     solution=solution_section,
                     feedback=feedback_section,
+                    teacher_feedback=teacher_feedback_section,
                 )
             else:
                 reprompt_text = prompt_texts[i]
@@ -690,14 +721,19 @@ class RayPPOTrainer:
 
         # Compute which samples actually use feedback (accounting for environment_feedback_only_without_solution)
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
+        teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
         feedback_used = [
             feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
+            for i in range(batch_size)
+        ]
+        teacher_feedback_used = [
+            teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
             for i in range(batch_size)
         ]
 
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
+            [solution_strs[i] is not None or feedback_used[i] or teacher_feedback_used[i] for i in range(batch_size)],
             dtype=torch.float32,
             device=device
         )
@@ -707,12 +743,16 @@ class RayPPOTrainer:
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for f in feedback_list if f is not None)
         num_with_feedback_used = sum(1 for f in feedback_used if f)
+        num_with_teacher_feedback_available = sum(1 for f in teacher_feedback_list if f is not None)
+        num_with_teacher_feedback_used = sum(1 for f in teacher_feedback_used if f)
         num_with_solution = sum(1 for s in solution_strs if s is not None)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0]) / len(uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
+            "self_distillation/teacher_feedback_available_fraction": num_with_teacher_feedback_available / batch_size,
+            "self_distillation/teacher_feedback_used_fraction": num_with_teacher_feedback_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
             "self_distillation/reprompt_len_mean": reprompt_lens.mean().item(),
             "self_distillation/reprompt_len_max": reprompt_lens.max().item(),
@@ -1869,7 +1909,20 @@ class RayPPOTrainer:
                         with marked_timer("update_weights", timing_raw, color="red"):
                             self.checkpoint_manager.update_weights()
 
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        actor_raw_metrics = actor_output.meta_info["metrics"]
+                        sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
+                        actor_output_metrics = reduce_metrics(actor_raw_metrics)
+                        if sd_token_hist is not None and "wandb" in self.config.trainer.logger:
+                            import wandb
+                            if wandb.run is not None:
+                                # sd_token_hist may be a list-of-lists (one per DP worker); flatten it
+                                if sd_token_hist and isinstance(sd_token_hist[0], (list, tuple)):
+                                    flat = [v for sublist in sd_token_hist for v in sublist]
+                                else:
+                                    flat = sd_token_hist
+                                actor_output_metrics["actor/sd_token_dist"] = wandb.Histogram(
+                                    sequence=flat
+                                )
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled

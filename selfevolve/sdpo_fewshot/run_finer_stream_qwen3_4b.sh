@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+python -m pip install matplotlib --quiet
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -11,7 +13,7 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
-# export RAY_DEBUG=1
+# export RAY_DEBUG="legacy"
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
@@ -21,14 +23,15 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1} # Use -1 to indicate using the full dataset; otherwise, specify the number of samples to use for training (e.g., 1000)
+NUM_DATA=${NUM_DATA:-32}
+TEACHER_SERVER_IP=${TEACHER_SERVER_IP:-"127.0.0.1"} # if set, will enable teacher-student distillation with the teacher at this IP address
 
-python selfevolve/iterative_opd/prepare_finer_dataset.py \
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
         --num_data $NUM_DATA \
         --output data/finer/train_${NUM_DATA}.parquet
-python selfevolve/iterative_opd/prepare_finer_dataset.py \
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
         --output data/finer/val.parquet
@@ -39,7 +42,7 @@ finer_val_path=data/finer/val.parquet
 # Hyperparameters (from experiments/run_sdpo_all.sh)
 TRAIN_BATCH_SIZE=32
 ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
-LR=${LR:-1e-5}
+LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
@@ -48,17 +51,21 @@ EMA_WEIGHT=${EMA_WEIGHT:-0.05}
 TASK=finer
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
-CONCISE_FREQUENCY=${CONCISE_FREQUENCY:-4}
-MAX_BULLETS=${MAX_BULLETS:-null}
-CONCISE_METHOD=${CONCISE_METHOD:-reset} # or 'prioritized'
-use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True}
-use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True}
+DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
+ENABLE_THINKING=True
+remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
+include_teacher_feedback=${include_teacher_feedback:-True}
+max_updates_per_batch=${max_updates_per_batch:-4}
+min_updates_per_batch=${min_updates_per_batch:-1}
+early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.01}
+feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
+include_previous_attempt=${include_previous_attempt:-True} # whether to include the previous attempt into the reprompt
 
-project_name='iterative_opd_finer'
-exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_concise${CONCISE_FREQUENCY}_maxb${MAX_BULLETS}_cmethod${CONCISE_METHOD}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
+project_name='sdpo_stream_finer'
+exp_name="qwen3_4b_stream_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_disttopk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_tfb${include_teacher_feedback}_maxup${max_updates_per_batch}_minup${min_updates_per_batch}_earlystop${early_stop_improvement_threshold}_foc${feedback_on_correct}_incprev${include_previous_attempt}"
 
 ########################### Sync Results ###########################
 
@@ -102,14 +109,15 @@ DATA=(
     data.train_files=${finer_train_path}
     data.val_files=${finer_val_path}
     data.train_batch_size=${TRAIN_BATCH_SIZE}
-    data.max_prompt_length=49152
+    data.max_prompt_length=4096
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
-    custom_reward_function.path=selfevolve/iterative_opd/feedback/finer.py
+    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
     custom_reward_function.name=compute_score_count
-    +custom_reward_function.reward_kwargs.correctness_feedback=True
+    +custom_reward_function.reward_kwargs.correctness_feedback=${CORRECTNESS_FEEDBACK}
 )
 
 MODEL=(
@@ -121,19 +129,19 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr=$LR
     actor_rollout_ref.actor.ppo_mini_batch_size=32
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10
+    actor_rollout_ref.actor.optim.lr_warmup_steps=0
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.self_distillation.distillation_topk=100
+    actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
-    actor_rollout_ref.actor.self_distillation.concise_frequency=${CONCISE_FREQUENCY}
-    actor_rollout_ref.actor.self_distillation.max_bullets=${MAX_BULLETS}
-    actor_rollout_ref.actor.self_distillation.concise_method=${CONCISE_METHOD}
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
+    actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
+    actor_rollout_ref.actor.self_distillation.include_teacher_feedback=${include_teacher_feedback}
+    actor_rollout_ref.actor.self_distillation.teacher_feedback_only_without_solution=False
+    actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
 )
 
 ROLLOUT=(
@@ -144,7 +152,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=65536
+    actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
@@ -156,27 +164,44 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.param_offload=True
 )
 
+TEACHER=(
+    actor_rollout_ref.actor.self_distillation.teacher.enabled=True
+    actor_rollout_ref.actor.self_distillation.teacher.server_ip=${TEACHER_SERVER_IP}
+    actor_rollout_ref.actor.self_distillation.teacher.feedback_on_correct=${feedback_on_correct}
+)
+
 ALGORITHM=(
     algorithm.lam=${LAMBDA}
     algorithm.rollout_correction.rollout_is=token
 )
 
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    N_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l | tr -d ' ')
+else
+    N_GPUS=8
+fi
+
 TRAINER=(
+    trainer.use_stream_trainer=True
+    trainer.max_updates_per_batch=${max_updates_per_batch}
+    trainer.min_updates_per_batch=${min_updates_per_batch}
+    trainer.early_stop_improvement_threshold=${early_stop_improvement_threshold}
     trainer.logger='["console","wandb"]'
-    trainer.total_epochs=${NUM_EPOCHS}
+    trainer.total_epochs=1
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
-    trainer.n_gpus_per_node=8
+    trainer.n_gpus_per_node=${N_GPUS}
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=4
-    trainer.test_freq=4
+    trainer.save_freq=-1
+    trainer.test_freq=1
+    trainer.forget_eval.eval_freq=1
     trainer.val_before_train=True
 )
 
 ########################### Launch ###########################
 
-"$PYTHON" -m selfevolve.iterative_opd.trainer.main_ppo \
+"$PYTHON" -m selfevolve.sdpo_fewshot.trainer.main_ppo \
     --config-name=${CONFIG_NAME} \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
@@ -185,4 +210,5 @@ TRAINER=(
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${TRAINER[@]}" \
+    "${TEACHER[@]}" \
     "$@"

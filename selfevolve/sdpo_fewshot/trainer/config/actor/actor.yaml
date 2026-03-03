@@ -127,9 +127,19 @@ self_distillation:
   # Whether to remove <think>...</think> tokens from the loss calculation
   remove_thinking_in_loss: False
 
-  # Reprompting template - available variables: prompt, successful_previous_attempt, feedback
+  # Whether to include the student's own previous (failed) attempt in the reprompt
+  include_previous_attempt: False
+
+  # Previous attempt template - available variables: previous_attempt_raw
+  previous_attempt_template: |-
+
+    The following is your previous attempt:
+
+    {previous_attempt_raw}
+
+  # Reprompting template - available variables: prompt, previous_attempt, solution, feedback, teacher_feedback
   reprompt_template: |-
-    {prompt}{solution}{feedback}
+    {prompt}{previous_attempt}{solution}{feedback}{teacher_feedback}
 
     Correctly solve the original question.
 
@@ -143,9 +153,83 @@ self_distillation:
   # Feedback template - available variables: feedback_raw
   feedback_template: |-
 
-    The following is feedback from your unsuccessful earlier attempt:
+    The following is feedback from your earlier attempt:
 
     {feedback_raw}
+
+  # Whether to include teacher model feedback in reprompting
+  include_teacher_feedback: False
+
+  # If True, only use teacher feedback when no solution is available
+  teacher_feedback_only_without_solution: False
+
+  # Teacher feedback template - available variables: teacher_feedback_raw
+  # Leading newline is intentional: keeps the section absent (no blank line) when teacher_feedback=""
+  teacher_feedback_template: |-
+
+    The following is feedback from the teacher model:
+
+    {teacher_feedback_raw}
+
+  # Teacher feedback server configuration
+  teacher:
+
+    # Whether the teacher feedback server is enabled
+    enabled: false
+
+    # IP address of the teacher feedback server
+    server_ip: "127.0.0.1"
+
+    # Port of the teacher feedback server
+    server_port: 15555
+
+    # Number of parallel server workers
+    n_server_workers: 1
+
+    # Max tokens for teacher feedback generation
+    max_tokens: 16384
+
+    # Sampling temperature for teacher feedback generation
+    temperature: 0.7
+
+    # Max tokens for the feedback prompt sent to the teacher
+    max_feedback_prompt_len: 4096
+
+    # Whether to request teacher feedback for correctly solved samples (acc >= success_reward_threshold).
+    # By default (False), teacher feedback is only requested for incorrect samples.
+    feedback_on_correct: false
+
+    # Template for querying the teacher; available variables: {prompt}, {response}, {feedback}
+    feedback_prompt_template: |
+      You are an expert analyst and educator. Your job is to diagnose why a model's reasoning went wrong by analyzing the environment feedback.
+
+      **Instructions:**
+      - Carefully analyze the model's reasoning trace to identify where it went wrong
+      - Take the environment feedback into account
+      - Identify specific conceptual errors, calculation mistakes, or misapplied strategies
+      - Provide actionable insights that could help the model avoid this mistake in the future
+      - Focus on the root cause, not just surface-level errors
+      - Be specific about what the model should have done differently
+
+      Your output should be a json object, which contains the following fields
+        - error_identification: what specifically went wrong in the reasoning?
+        - root_cause_analysis: why did this error occur? What concept was misunderstood?
+        - correct_approach: what should the model have done instead?
+        - key_insight: what strategy, formula, or principle should be remembered to avoid this error?
+
+      Question: {prompt}
+
+      Student Response: {response}
+      
+      Environment feedback: {feedback}
+
+      **Answer in this exact JSON format:**
+      {{
+        "error_identification": "[What specifically went wrong in the reasoning?]",
+        "root_cause_analysis": "[Why did this error occur? What concept was misunderstood?]",
+        "correct_approach": "[What should the model have done instead?]",
+        "key_insight": "[What strategy, formula, or principle should be remembered to avoid this error?]"
+      }}
 
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0

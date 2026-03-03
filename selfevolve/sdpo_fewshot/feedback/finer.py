@@ -2,8 +2,16 @@ import random
 import re
 
 
+def _remove_thinking_trace(text: str) -> str:
+    # Case 1: complete <think>...</think> block in response
+    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 2: <think> was in the prompt, response starts with thinking content
+    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+    return out_text
+
 def extract_solution(solution_str):
     """Extract the answer from <answer>...</answer> tags."""
+    solution_str = _remove_thinking_trace(solution_str)
     answer_pattern = r"<answer>(.*?)</answer>"
     match = re.finditer(answer_pattern, solution_str, re.DOTALL)
     matches = list(match)

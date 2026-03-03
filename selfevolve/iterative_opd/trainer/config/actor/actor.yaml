@@ -153,7 +153,7 @@ self_distillation:
   # Feedback template - available variables: feedback_raw
   feedback_template: |-
 
-    The following is feedback from your unsuccessful earlier attempt:
+    The following is feedback from your earlier attempt:
 
     {feedback_raw}
 

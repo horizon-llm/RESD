@@ -14,8 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-PPO Trainer with Ray-based single controller.
-This trainer supports model-agonistic model initialization with huggingface
+1. set the epoch=1
+2. remove critic, since critic needs warmup and it is not a good fit for streaming data
+3. add inner-outer loop logic
+4. ensure the checkpoint save and resume always happen at the outer loop
+5. removed REMAX
+6. remove self.total_training_steps
+7. remove is_last_step and modified these:
+    - Inner loop break: now only if inner_stopped_early: break
+    - Validation trigger: now only global_steps % test_freq == 0
+    - Checkpoint save: now only is_last_batch or save_freq or ESI
+    - Exit: now only if is_last_batch: return — the dataloader exhaustion is the sole termination signal, which is the correct semantic for a streaming trainer.
+8. add teacher client feedback logic
+9. eval past batch to calculate forget
 """
 
 import re
@@ -34,6 +45,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+from collections import deque
 
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
@@ -67,6 +79,8 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+from ...teacher import TeacherClient
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -317,6 +331,28 @@ class StreamRayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
+        _teacher_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("teacher", None)
+        if _teacher_cfg and _teacher_cfg.get("enabled", False):
+            self.teacher_client = TeacherClient(
+                server_ip=_teacher_cfg.server_ip,
+                server_port=_teacher_cfg.server_port,
+                n_server_workers=_teacher_cfg.n_server_workers,
+                max_tokens=_teacher_cfg.max_tokens,
+                temperature=_teacher_cfg.temperature,
+                only_response=True,   # want generated text, not logprobs
+            )
+            self.n_teacher_workers = _teacher_cfg.n_server_workers
+        else:
+            self.teacher_client = None
+            self.n_teacher_workers = 0
+        
+        forget_cfg = self.config.trainer.get("forget_eval", {})
+        buf_size = forget_cfg.get("buffer_size", 5)
+        self.past_batch_buffer = deque(maxlen=buf_size)
+        # Each entry: (batch_idx, base_batch: DataProto, baseline_scores: np.ndarray)
+
+        self._forget_table_rows = []  # accumulate for matrix
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -381,13 +417,9 @@ class StreamRayPPOTrainer:
             f"{len(self.val_dataloader)}"
         )
 
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
-
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
-
-        self.total_training_steps = total_training_steps
-        print(f"Total training steps: {self.total_training_steps}")
+        max_k = self.config.trainer.get("max_updates_per_batch", 1)
+        total_training_steps = len(self.train_dataloader) * max_k
+        print(f"Total training steps (outer batches × max_k): {total_training_steps}")
 
         try:
             OmegaConf.set_struct(self.config, True)
@@ -494,13 +526,45 @@ class StreamRayPPOTrainer:
                 )
                 wandb.log({"self_distillation/teacher_prompt": wandb.Html(f"<pre>{sample}</pre>")}, step=step)
 
+    def _log_teacher_feedback(self, batch: DataProto, teacher_feedback_list: list, step: int):
+        """Log the teacher feedback prompt and response to wandb.
+
+        Logs the first non-None teacher feedback sample along with the
+        corresponding feedback prompt that was sent to the teacher model.
+        """
+        if "wandb" not in self.config.trainer.logger:
+            return
+        import wandb
+        if wandb.run is None:
+            return
+
+        teacher_cfg = self.config.actor_rollout_ref.actor.self_distillation.teacher
+        batch_size = batch.batch.batch_size[0]
+        prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+
+        # Find first non-None feedback to log as a sample
+        for i in range(batch_size):
+            if teacher_feedback_list[i] is not None:
+                # Reconstruct the feedback prompt that was sent to the teacher
+                env_fb = ""
+                if "feedback" in batch.non_tensor_batch:
+                    env_fb = batch.non_tensor_batch["feedback"][i] or ""
+                feedback_prompt = teacher_cfg.feedback_prompt_template.format(
+                    prompt=prompts[i], response=responses[i], feedback=env_fb,
+                )
+                wandb.log({
+                    "teacher/feedback_prompt": wandb.Html(f"<pre>{feedback_prompt}</pre>"),
+                    "teacher/feedback_response": wandb.Html(f"<pre>{teacher_feedback_list[i]}</pre>"),
+                }, step=step)
+                break
+
     def _compute_reward_legacy(
         self,
         batch: DataProto,
         reward_fn=None,
         reward_for_val: bool = False,
-        sum_reward: bool = False,
-    ) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
         """
         Compute or extract reward from batch.
 
@@ -511,11 +575,9 @@ class StreamRayPPOTrainer:
             batch: DataProto containing the batch data
             reward_fn: Reward function to use if rm_scores doesn't exist (for training/validation)
             reward_for_val: Whether this is for validation
-            sum_reward: Whether to sum reward tensor along last dimension (for REMAX baseline)
 
         Returns:
-            If reward_for_val=False and sum_reward=True: summed reward_tensor (1D tensor)
-            Otherwise: tuple of (reward_tensor, reward_extra_infos_dict)
+            tuple of (reward_tensor, reward_extra_infos_dict)
         """
         if reward_fn is None:
             raise ValueError("reward_fn must be provided when rm_scores is not available.")
@@ -523,14 +585,10 @@ class StreamRayPPOTrainer:
         if reward_for_val:
             result = reward_fn(batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
-            if sum_reward:
-                reward_tensor = reward_tensor.sum(dim=-1)
             reward_extra_infos_dict = result.get("reward_extra_info", {})
             return reward_tensor, reward_extra_infos_dict
         else:
             reward_tensor, reward_extra_infos_dict = compute_reward(batch, reward_fn)
-            if sum_reward:
-                reward_tensor = reward_tensor.sum(dim=-1)
             return reward_tensor, reward_extra_infos_dict
 
     @staticmethod
@@ -570,8 +628,11 @@ class StreamRayPPOTrainer:
     
     @staticmethod
     def _remove_thinking_trace(text: str) -> str:
-        """Remove <think>...</think> tags and their content from text."""
-        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 1: complete <think>...</think> block in response
+        out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+        # Case 2: <think> was in the prompt, response starts with thinking content
+        out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+        return out_text
     
     def _get_solution(
         self,
@@ -593,7 +654,118 @@ class StreamRayPPOTrainer:
         if remove_thinking_from_demonstration:
             solution_str = self._remove_thinking_trace(solution_str)
         return solution_str
-    
+
+    def _submit_teacher_feedback(
+        self,
+        batch: DataProto,
+        env_feedback_list: list | None = None,
+        reward_tensor: torch.Tensor | None = None,
+    ) -> tuple:
+        """Non-blocking: tokenize feedback requests and enqueue them to the teacher server.
+
+        Must be called after `batch` contains both `prompts` and `responses` tensors
+        (i.e. after gen_batch_output has been merged into batch).
+
+        By default only submits feedback for samples that are currently incorrect
+        (seq reward < success_reward_threshold). Set teacher.feedback_on_correct=True
+        to also request feedback for correctly solved samples.
+
+        Args:
+            env_feedback_list: list[str | None] of length batch_size with environment feedback
+                per sample. Passed as {feedback} into feedback_prompt_template. Falls back to ""
+                when None or not provided.
+            reward_tensor: token-level reward tensor of shape (batch_size, seq_len). Used to
+                identify correctly-solved samples (sum >= success_reward_threshold) which are
+                skipped unless feedback_on_correct=True.
+
+        Returns:
+            (request_indices, futures, mbs) — passed opaquely to _resolve_teacher_feedback.
+            - request_indices: list[int] mapping future-slot positions back to batch indices.
+            - futures: list of concurrent.futures.Future, one per worker.
+            - mbs: number of samples per future (items per micro-batch).
+        """
+        teacher_cfg = self.config.actor_rollout_ref.actor.self_distillation.teacher
+        sd_cfg = self.config.actor_rollout_ref.actor.self_distillation
+        batch_size = batch.batch.batch_size[0]
+
+        # Determine which indices need teacher feedback.
+        feedback_on_correct = teacher_cfg.get("feedback_on_correct", False)
+        if reward_tensor is not None and not feedback_on_correct:
+            success_threshold = sd_cfg.get("success_reward_threshold", 0.5)
+            seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
+            request_indices = [i for i in range(batch_size) if seq_scores[i] < success_threshold]
+        else:
+            request_indices = list(range(batch_size))
+
+        if not request_indices:
+            return [], [], 1
+
+        prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        env_fb = env_feedback_list or [None] * batch_size
+
+        tmpl = teacher_cfg.feedback_prompt_template
+        request_texts = [
+            tmpl.format(prompt=prompts[i], response=responses[i], feedback=env_fb[i] or "")
+            for i in request_indices
+        ]
+
+        encoded = self.tokenizer(
+            request_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=teacher_cfg.get("max_feedback_prompt_len", 4096),
+        )
+        input_ids = encoded["input_ids"]
+        attn = encoded["attention_mask"].bool()
+        # Strip padding — send only real tokens to the server.
+        n_submit = len(request_indices)
+        ids_list = [input_ids[i][attn[i]].tolist() for i in range(n_submit)]
+
+        # Split across worker threads (one Future per worker).
+        mbs = max(1, n_submit // self.n_teacher_workers)
+        futures = []
+        for start in range(0, n_submit, mbs):
+            futures.append(self.teacher_client.submit(ids_list[start : start + mbs]))
+
+        return request_indices, futures, mbs
+
+    def _resolve_teacher_feedback(
+        self,
+        teacher_futures: tuple,
+        batch_size: int,
+    ) -> list:
+        """Blocking: wait for teacher futures and decode responses to text.
+
+        Returns a list[str | None] of length batch_size containing the teacher's generated
+        feedback text for each sample. None indicates generation failed for that sample.
+        This is stored separately from env feedback and handled independently in
+        _maybe_build_self_distillation_batch.
+
+        Args:
+            teacher_futures: the (request_indices, futures, mbs) tuple from _submit_teacher_feedback.
+            batch_size: number of samples in the batch.
+
+        Returns:
+            list[str | None] of length batch_size — raw teacher feedback per sample.
+        """
+        request_indices, futures, mbs = teacher_futures
+        result = [None] * batch_size
+
+        for fut_idx, future in enumerate(futures):
+            start = fut_idx * mbs  # first batch-index handled by this future
+            try:
+                teacher_responses, _, _ = future.result()
+                for j, resp_ids in enumerate(teacher_responses):
+                    batch_idx = request_indices[start + j]
+                    token_ids = resp_ids.tolist() if hasattr(resp_ids, "tolist") else resp_ids
+                    result[batch_idx] = self._remove_thinking_trace(self.tokenizer.decode(token_ids, skip_special_tokens=True))
+            except Exception as e:
+                print(f"[teacher_feedback] future {fut_idx} failed: {e}")
+
+        return result
+
     def _maybe_build_self_distillation_batch(
         self,
         batch: DataProto,
@@ -612,12 +784,20 @@ class StreamRayPPOTrainer:
         prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch["raw_prompt"]]
         batch_size = batch.batch.batch_size[0]
 
-        # Extract feedback if available and include_environment_feedback is enabled
+        # Extract env feedback if available and include_environment_feedback is enabled
         feedback_list = self._collect_feedback(
             include_environment_feedback=self_distillation_cfg.include_environment_feedback,
             reward_extra_infos_dict=reward_extra_infos_dict,
             batch_size=batch_size,
         )
+
+        # Extract teacher feedback if available and include_teacher_feedback is enabled
+        teacher_feedback_list: list[Any] = [None] * batch_size
+        if self_distillation_cfg.get("include_teacher_feedback", False) and reward_extra_infos_dict is not None:
+            raw_teacher_feedback = reward_extra_infos_dict.get("teacher_feedback", [])
+            for i in range(min(len(raw_teacher_feedback), batch_size)):
+                if raw_teacher_feedback[i] and isinstance(raw_teacher_feedback[i], str) and raw_teacher_feedback[i].strip():
+                    teacher_feedback_list[i] = raw_teacher_feedback[i]
 
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
         solution_strs = [
@@ -636,10 +816,21 @@ class StreamRayPPOTrainer:
             system_messages = batch.non_tensor_batch["raw_prompt"][i][:-1]
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
+            has_teacher_feedback = teacher_feedback_list[i] is not None
+            include_previous_attempt = self_distillation_cfg.get("include_previous_attempt", False)
             feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
+            teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
 
-            # If feedback_only_without_solution is True, only use feedback when no solution exists
+            # If *_only_without_solution is True, only use that feedback type when no solution exists
             use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
+            use_teacher_feedback = has_teacher_feedback and (not teacher_feedback_only_without_solution or not has_solution)
+
+            # build previous attempt section (only when feedback or teacher feedback is present)
+            previous_attempt_section = ""
+            if include_previous_attempt and (use_feedback or use_teacher_feedback):
+                previous_attempt_section = self_distillation_cfg.previous_attempt_template.format(
+                    previous_attempt_raw=response_texts[i]
+                )
 
             # build solution section
             solution_section = ""
@@ -648,19 +839,28 @@ class StreamRayPPOTrainer:
                     successful_previous_attempt=solution_strs[i]
                 )
 
-            # build feedback section
+            # build env feedback section
             feedback_section = ""
             if use_feedback:
                 feedback_section = self_distillation_cfg.feedback_template.format(
                     feedback_raw=feedback_list[i]
                 )
 
-            # combine solution and feedback sections
-            if use_feedback or has_solution:
+            # build teacher feedback section (independent of env feedback)
+            teacher_feedback_section = ""
+            if use_teacher_feedback:
+                teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
+                    teacher_feedback_raw=teacher_feedback_list[i]
+                )
+
+            # combine all sections into the reprompt
+            if use_feedback or use_teacher_feedback or has_solution:
                 reprompt_text = self_distillation_cfg.reprompt_template.format(
                     prompt=prompt_texts[i],
+                    previous_attempt=previous_attempt_section,
                     solution=solution_section,
                     feedback=feedback_section,
+                    teacher_feedback=teacher_feedback_section,
                 )
             else:
                 reprompt_text = prompt_texts[i]
@@ -689,16 +889,21 @@ class StreamRayPPOTrainer:
         teacher_attention_mask = torch.cat([teacher_prompt["attention_mask"].to(device), response_mask], dim=1)
         teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
 
-        # Compute which samples actually use feedback (accounting for environment_feedback_only_without_solution)
+        # Compute which samples actually use each feedback type
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
+        teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
         feedback_used = [
             feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
             for i in range(batch_size)
         ]
+        teacher_feedback_used = [
+            teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
+            for i in range(batch_size)
+        ]
 
-        # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
+        # self_distillation_mask is True if sample will get a reprompted message
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] for i in range(batch_size)],
+            [solution_strs[i] is not None or feedback_used[i] or teacher_feedback_used[i] for i in range(batch_size)],
             dtype=torch.float32,
             device=device
         )
@@ -708,12 +913,16 @@ class StreamRayPPOTrainer:
         uids = set(batch.non_tensor_batch["uid"])
         num_with_feedback_available = sum(1 for f in feedback_list if f is not None)
         num_with_feedback_used = sum(1 for f in feedback_used if f)
+        num_with_teacher_feedback_available = sum(1 for f in teacher_feedback_list if f is not None)
+        num_with_teacher_feedback_used = sum(1 for f in teacher_feedback_used if f)
         num_with_solution = sum(1 for s in solution_strs if s is not None)
         metrics = {
             "self_distillation/success_group_fraction": len([uid for uid in uids if len(success_by_uid[uid]) > 0]) / len(uids),
             "self_distillation/success_sample_fraction": num_with_solution / batch_size,
             "self_distillation/feedback_available_fraction": num_with_feedback_available / batch_size,
             "self_distillation/feedback_used_fraction": num_with_feedback_used / batch_size,
+            "self_distillation/teacher_feedback_available_fraction": num_with_teacher_feedback_available / batch_size,
+            "self_distillation/teacher_feedback_used_fraction": num_with_teacher_feedback_used / batch_size,
             "self_distillation/reprompt_sample_fraction": self_distillation_mask.float().mean().item(),
             "self_distillation/reprompt_len_mean": reprompt_lens.mean().item(),
             "self_distillation/reprompt_len_max": reprompt_lens.max().item(),
@@ -965,6 +1174,138 @@ class StreamRayPPOTrainer:
             reward_extra_infos_dict[key] = list_a + list_b
 
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+    
+    def _get_forget_matrix_metrics(self) -> dict:
+        """Return forget matrix/table/heatmap metrics for deferred logging."""
+        if "wandb" not in self.config.trainer.logger:
+            return {}
+        import wandb
+        if wandb.run is None or not self._forget_table_rows:
+            return {}
+
+        metrics = {}
+
+        table = wandb.Table(
+            columns=["global_step", "batch_idx", "reward_mean"],
+            data=[[r["global_step"], r["batch_idx"], r["reward_mean"]]
+                for r in self._forget_table_rows],
+        )
+
+        # Average delta (forgetting) across all batches at each global_step
+        from collections import defaultdict
+        step_deltas = defaultdict(list)
+        for r in self._forget_table_rows:
+            if r["delta"] is not None:
+                step_deltas[r["global_step"]].append(r["delta"])
+        avg_delta_table = wandb.Table(
+            columns=["global_step", "avg_delta"],
+            data=[[step, sum(vals) / len(vals)] for step, vals in sorted(step_deltas.items())],
+        )
+
+        metrics["forget/matrix_table"] = table
+        metrics["forget/reward_curves"] = wandb.plot.line(
+            avg_delta_table, x="global_step", y="avg_delta",
+            title="Avg forgetting delta (current - baseline)",
+        )
+
+        # heatmap as image (requires matplotlib)
+        metrics.update(self._get_forget_heatmap_metrics())
+
+        return metrics
+
+    def _get_forget_heatmap_metrics(self) -> dict:
+        """Return forget heatmap as a wandb.Image in a metrics dict."""
+        try:
+            import matplotlib.pyplot as plt
+            import pandas as pd
+            import wandb
+
+            df = pd.DataFrame(self._forget_table_rows)
+            pivot = df.pivot(index="batch_idx", columns="global_step", values="reward_mean")
+
+            fig, ax = plt.subplots(figsize=(max(4, len(pivot.columns) * 0.6), max(3, len(pivot) * 0.5)))
+            im = ax.imshow(pivot.values, aspect="auto", interpolation="nearest",
+                        vmin=0.0, vmax=1.0, cmap="RdYlGn")
+            ax.set_xticks(range(len(pivot.columns)))
+            ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=7)
+            ax.set_yticks(range(len(pivot.index)))
+            ax.set_yticklabels([f"batch_{i}" for i in pivot.index], fontsize=7)
+            # Annotate each cell with the reward value
+            for i in range(len(pivot.index)):
+                for j in range(len(pivot.columns)):
+                    val = pivot.values[i, j]
+                    if not pd.isna(val):
+                        text_color = "black" if 0.25 < val < 0.75 else "white"
+                        ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                                fontsize=6, color=text_color)
+            ax.set_xlabel("global_step")
+            ax.set_ylabel("training batch")
+            ax.set_title("Forgetting matrix (reward)")
+            plt.colorbar(im, ax=ax)
+            plt.tight_layout()
+            heatmap_img = wandb.Image(fig)
+            plt.close(fig)
+            return {"forget/heatmap": heatmap_img}
+        except Exception as e:
+            print(f"[forget_heatmap] skipped: {e}")
+            return {}
+    
+    def _eval_on_past_batches(self) -> dict:
+        if not self.past_batch_buffer:
+            return {}
+
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        metrics = {}
+        all_current_scores, all_deltas = [], []
+
+        for stored_idx, past_base_batch, baseline_scores in self.past_batch_buffer:
+            # --- generation ---
+            gen_batch = self._get_gen_batch(deepcopy(past_base_batch))
+            gen_batch.meta_info["global_steps"] = self.global_steps
+            gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+            self.checkpoint_manager.sleep_replicas()
+            gen_batch_output.meta_info.pop("timing", None)
+
+            eval_batch = past_base_batch.repeat(repeat_times=rollout_n, interleave=True)
+            eval_batch = eval_batch.union(gen_batch_output)
+            eval_batch.batch["response_mask"] = compute_response_mask(eval_batch)
+
+            # --- reward ---
+            reward_tensor, _ = self._compute_reward_legacy(
+                eval_batch, reward_fn=self.val_reward_fn, reward_for_val=True
+            )
+            n_prompts = len(past_base_batch.batch)
+            current_per_prompt = reward_tensor.sum(-1).cpu().numpy().reshape(n_prompts, rollout_n).mean(-1)
+            current_mean = float(current_per_prompt.mean())
+            all_current_scores.extend(current_per_prompt.tolist())
+
+            # per-batch curves  →  one wandb line per past batch
+            metrics[f"forget/batch_{stored_idx}/reward_mean"] = current_mean
+            if baseline_scores is not None:
+                delta = current_mean - float(baseline_scores.mean())
+                metrics[f"forget/batch_{stored_idx}/delta"] = delta
+                all_deltas.append(delta)
+
+            # accumulate row for the table
+            self._forget_table_rows.append({
+                "global_step": self.global_steps,
+                "batch_idx": stored_idx,
+                "reward_mean": current_mean,
+                "delta": (current_mean - float(baseline_scores.mean())) if baseline_scores is not None else None,
+            })
+
+            self.checkpoint_manager.update_weights()
+
+        # aggregate
+        metrics["forget/reward_mean_all"] = float(np.mean(all_current_scores))
+        metrics["forget/n_past_batches"] = len(self.past_batch_buffer)
+        if all_deltas:
+            metrics["forget/delta_mean"] = float(np.mean(all_deltas))
+
+        # fold wandb table/heatmap into metrics for deferred logging
+        metrics.update(self._get_forget_matrix_metrics())
+        return metrics
 
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.
@@ -1431,6 +1772,9 @@ class StreamRayPPOTrainer:
 
         self.global_steps = 0
 
+        forget_cfg = self.config.trainer.get("forget_eval", {})
+        forget_freq = forget_cfg.get("eval_freq", 0)
+
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights()
@@ -1449,12 +1793,16 @@ class StreamRayPPOTrainer:
             rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
             rollout_skip.wrap_generate_sequences()
 
-        # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        # Total inner steps is an upper bound (early stopping may reduce actual count).
+        _max_k = self.config.trainer.get("max_updates_per_batch", 1)
+        progress_bar = tqdm(
+            total=len(self.train_dataloader) * _max_k,
+            initial=self.global_steps,
+            desc="Training Progress",
+        )
 
         # we start from step 1
         self.global_steps += 1
-        last_val_metrics = None
         self.max_steps_duration = 0
 
         prev_step_profile = False
@@ -1504,7 +1852,6 @@ class StreamRayPPOTrainer:
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
 
-                is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -1520,47 +1867,14 @@ class StreamRayPPOTrainer:
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
-
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            if not self.async_rollout_mode:
-                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                            else:
-                                if curr_step_profile:
-                                    self.async_rollout_manager.start_profile()
-                                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                                self.checkpoint_manager.sleep_replicas()
-                                if curr_step_profile:
-                                    self.async_rollout_manager.stop_profile()
-                            batch = batch.union(gen_baseline_output)
-                            # compute reward model score on batch
-                            rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                batch_reward = self._compute_reward_colocate(batch)
-                                batch = batch.union(batch_reward)
-
-                            # Compute or extract reward for REMAX baseline
-                            if not self.use_reward_loop:
-                                reward_baseline_tensor = self._compute_reward_legacy(
-                                    batch, reward_fn=self.reward_fn, sum_reward=True
-                                )
-                            else:
-                                reward_baseline_tensor = batch.batch["rm_scores"].sum(dim=-1)
-
-                            keys_to_pop = set(gen_baseline_output.batch.keys())
-                            if rm_scores is not None:
-                                keys_to_pop.update(rm_scores.batch.keys())
-                            batch.pop(batch_keys=list(keys_to_pop))
-
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
-
-                            del rm_scores, gen_baseline_batch, gen_baseline_output
+                    
                     # repeat to align with repeated responses in rollout
                     # Always rebuild from base_batch so each inner iteration starts clean
                     batch = base_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    # teacher_futures will be submitted after reward so env feedback can be included.
+                    teacher_futures = None
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1604,6 +1918,16 @@ class StreamRayPPOTrainer:
                     if reward_extra_infos_dict:
                         metrics.update(
                             self._compute_train_batch_metrics(reward_extra_infos_dict, prefix="train/pre_update")
+                        )
+
+                    # Kick off teacher feedback request now that env feedback is available.
+                    # Overlaps with old_log_prob and ref_log_prob GPU computation below.
+                    if self.teacher_client is not None:
+                        env_fb = list(reward_extra_infos_dict.get("feedback", [None] * batch.batch.batch_size[0]))
+                        teacher_futures = self._submit_teacher_feedback(
+                            batch,
+                            env_feedback_list=env_fb,
+                            reward_tensor=reward_tensor,
                         )
 
                     # Operating Mode Selection:
@@ -1660,6 +1984,22 @@ class StreamRayPPOTrainer:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                    
+                    # 3. Now we need the feedback. If teacher is done → instant.
+                    #    If not done yet → main thread blocks here until it is.
+                    #    Stored separately from env feedback ("feedback") so both are
+                    #    available as independent sections in the reprompt.
+                    if self.teacher_client is not None:
+                        with marked_timer("teacher_feedback_wait", timing_raw):
+                            reward_extra_infos_dict["teacher_feedback"] = self._resolve_teacher_feedback(
+                                teacher_futures,
+                                batch.batch.batch_size[0],
+                            )
+                            self._log_teacher_feedback(
+                                batch,
+                                reward_extra_infos_dict["teacher_feedback"],
+                                self.global_steps,
+                            )
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -1724,7 +2064,21 @@ class StreamRayPPOTrainer:
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
                         actor_output = self._update_actor(batch)
-                    actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                    actor_raw_metrics = actor_output.meta_info["metrics"]
+                    # Pop histogram data before reduce_metrics (it only handles scalars)
+                    sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
+                    actor_output_metrics = reduce_metrics(actor_raw_metrics)
+                    if sd_token_hist is not None and "wandb" in self.config.trainer.logger:
+                        import wandb
+                        if wandb.run is not None:
+                            # sd_token_hist may be a list-of-lists (one per DP worker); flatten it
+                            if sd_token_hist and isinstance(sd_token_hist[0], (list, tuple)):
+                                flat = [v for sublist in sd_token_hist for v in sublist]
+                            else:
+                                flat = sd_token_hist
+                            actor_output_metrics["actor/sd_token_dist"] = wandb.Histogram(
+                                sequence=flat
+                            )
                     metrics.update(actor_output_metrics)
 
                     # early stop: fraction of prompts that improved vs previous inner iteration
@@ -1732,6 +2086,13 @@ class StreamRayPPOTrainer:
                     n_prompts = len(base_batch.batch)
                     scores = batch.batch["token_level_scores"].sum(-1).cpu().numpy()
                     scores_per_prompt = scores.reshape(n_prompts, rollout_n).mean(-1)
+
+                    # (baseline = scores from the first inner update)
+                    if forget_freq > 0 and update_iter == 0:
+                        self.past_batch_buffer.append(
+                            (batch_idx, deepcopy(base_batch), scores_per_prompt.copy())
+                        )
+
                     if prev_scores is not None and update_iter + 1 >= min_k:
                         improved_frac = float((scores_per_prompt > prev_scores).mean())
                         metrics["training/improved_frac"] = improved_frac
@@ -1743,16 +2104,6 @@ class StreamRayPPOTrainer:
                     # iteration generates with the freshly updated policy)
                     with marked_timer("update_weights", timing_raw, color="red"):
                         self.checkpoint_manager.update_weights()
-
-                # validate
-                if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
-                ):
-                    with marked_timer("testing", timing_raw, color="green"):
-                        val_metrics: dict = self._validate()
-                        if is_last_step:
-                            last_val_metrics = val_metrics
-                    metrics.update(val_metrics)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -1793,10 +2144,16 @@ class StreamRayPPOTrainer:
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
 
-                # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                # Defer logging for the last inner iteration so that outer-loop
+                # metrics (val, forget) can be merged into the same wandb step.
+                # wandb silently drops data logged at an already-committed step,
+                # so we must send everything in a single logger.log call.
+                is_last_inner = (update_iter + 1 >= max_k) or inner_stopped_early
+                if not is_last_inner:
+                    logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
+                last_inner_step = self.global_steps
                 self.global_steps += 1
 
                 if (
@@ -1807,7 +2164,7 @@ class StreamRayPPOTrainer:
                         tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
                     )
 
-                if is_last_step or inner_stopped_early:
+                if inner_stopped_early:
                     break  # outer loop handles final save and return
 
             # ----------------------------------------------------------------
@@ -1818,10 +2175,33 @@ class StreamRayPPOTrainer:
                 max_steps_duration=self.max_steps_duration,
                 redundant_time=self.config.trainer.esi_redundant_time,
             )
+
+            # validate
+            if self.config.trainer.test_freq > 0 and (
+                is_last_batch
+                or (batch_idx + 1) % self.config.trainer.test_freq == 0
+            ):
+                with marked_timer("testing", timing_raw, color="green"):
+                    val_metrics: dict = self._validate()
+                metrics.update(val_metrics)
+
+            # forget eval
+            if forget_freq > 0 and (
+                is_last_batch
+                or (batch_idx + 1) % forget_freq == 0
+            ):
+                with marked_timer("forget_eval", timing_raw, color="cyan"):
+                    forget_metrics = self._eval_on_past_batches()
+                metrics.update(forget_metrics)
+
+            # Log the deferred last-inner-iteration metrics together with any
+            # outer-loop metrics (val, forget) in a single call so wandb sees
+            # all keys at the same committed step.
+            logger.log(data=metrics, step=last_inner_step)
+
             # save_freq is interpreted as outer-batch count (batch_idx), not global_steps
             if self.config.trainer.save_freq > 0 and (
                 is_last_batch
-                or is_last_step
                 or (batch_idx + 1) % self.config.trainer.save_freq == 0
                 or esi_close_to_expiration
             ):
@@ -1830,10 +2210,9 @@ class StreamRayPPOTrainer:
                 with marked_timer("save_checkpoint", timing_raw, color="green"):
                     self._save_checkpoint()
 
-            if is_last_batch or is_last_step:
+            if is_last_batch:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
-                pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 return
 

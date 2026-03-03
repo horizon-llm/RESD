@@ -21,44 +21,38 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1} # Use -1 to indicate using the full dataset; otherwise, specify the number of samples to use for training (e.g., 1000)
+NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/iterative_opd/prepare_finer_dataset.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
-        --num_data $NUM_DATA \
-        --output data/finer/train_${NUM_DATA}.parquet
-python selfevolve/iterative_opd/prepare_finer_dataset.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
-        --output data/finer/val.parquet
+python selfevolve/sdpo_fewshot/preprocess.py --data_source selfevolve/sdpo/datasets/lcb_v6 --num_data $NUM_DATA
 
-finer_train_path=data/finer/train_${NUM_DATA}.parquet
-finer_val_path=data/finer/val.parquet
+finer_train_path=selfevolve/sdpo/datasets/lcb_v6/train_${NUM_DATA}.parquet
+finer_val_path=selfevolve/sdpo/datasets/lcb_v6/test.parquet
+
+MAX_WORKERS=${MAX_WORKERS:-8}
 
 # Hyperparameters (from experiments/run_sdpo_all.sh)
 TRAIN_BATCH_SIZE=32
-ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
 LR=${LR:-1e-5}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
 ALPHA=${ALPHA:-0.5}
 EMA_WEIGHT=${EMA_WEIGHT:-0.05}
-TASK=finer
+TASK=lcb_v6
 export TASK
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+NUM_EPOCHS=${NUM_EPOCHS:-10}
+CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
-CONCISE_FREQUENCY=${CONCISE_FREQUENCY:-4}
-MAX_BULLETS=${MAX_BULLETS:-null}
-CONCISE_METHOD=${CONCISE_METHOD:-reset} # or 'prioritized'
-use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True}
-use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True}
+DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
+ENABLE_THINKING=True
+remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
+remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} 
 
-project_name='iterative_opd_finer'
-exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_concise${CONCISE_FREQUENCY}_maxb${MAX_BULLETS}_cmethod${CONCISE_METHOD}_reflection${use_reflection_in_teacher_prompt}_playbook${use_playbook_in_teacher_prompt}"
+project_name='sdpo_lcb_v6'
+exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_rmthloss${remove_thinking_in_loss}_rmthdemo${remove_thinking_from_demonstration}"
 
 ########################### Sync Results ###########################
 
@@ -102,14 +96,15 @@ DATA=(
     data.train_files=${finer_train_path}
     data.val_files=${finer_val_path}
     data.train_batch_size=${TRAIN_BATCH_SIZE}
-    data.max_prompt_length=49152
+    data.max_prompt_length=4096
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
-    custom_reward_function.path=selfevolve/iterative_opd/feedback/finer.py
-    custom_reward_function.name=compute_score_count
-    +custom_reward_function.reward_kwargs.correctness_feedback=True
+    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/code.py
+    custom_reward_function.name=compute_score
+    +custom_reward_function.reward_kwargs.max_workers=${MAX_WORKERS}
 )
 
 MODEL=(
@@ -124,27 +119,25 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.self_distillation.distillation_topk=100
+    actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
-    actor_rollout_ref.actor.self_distillation.concise_frequency=${CONCISE_FREQUENCY}
-    actor_rollout_ref.actor.self_distillation.max_bullets=${MAX_BULLETS}
-    actor_rollout_ref.actor.self_distillation.concise_method=${CONCISE_METHOD}
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
+    actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
+    actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=${remove_thinking_from_demonstration}
 )
 
 ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.n=$ROLLOUT_BATCH_SIZE
-    actor_rollout_ref.rollout.val_kwargs.n=1
+    actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=65536
+    actor_rollout_ref.rollout.max_model_len=32768
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
@@ -171,12 +164,11 @@ TRAINER=(
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=4
     trainer.test_freq=4
-    trainer.val_before_train=True
 )
 
 ########################### Launch ###########################
 
-"$PYTHON" -m selfevolve.iterative_opd.trainer.main_ppo \
+"$PYTHON" -m selfevolve.sdpo_fewshot.trainer.main_ppo \
     --config-name=${CONFIG_NAME} \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \

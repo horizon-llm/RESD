@@ -25,7 +25,45 @@ from verl.workers.config.engine import FSDPEngineConfig, McoreEngineConfig
 from verl.workers.config.model import HFModelConfig
 from verl.workers.config.optimizer import OptimizerConfig
 
-__all__ = ["SelfDistillationConfig", "PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = ["TeacherFeedbackConfig", "SelfDistillationConfig", "PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+
+
+@dataclass
+class TeacherFeedbackConfig(BaseConfig):
+    """Configuration for the teacher feedback server.
+
+    Args:
+        enabled (bool): Whether the teacher feedback server is enabled.
+        server_ip (str): IP address of the teacher feedback server.
+        server_port (int): Port of the teacher feedback server.
+        n_server_workers (int): Number of parallel server workers.
+        max_tokens (int): Max tokens for teacher feedback generation.
+        temperature (float): Sampling temperature for teacher feedback generation.
+        max_feedback_prompt_len (int): Max tokens for the feedback prompt sent to the teacher.
+        feedback_on_correct (bool): Whether to request teacher feedback for correctly solved samples
+            (seq reward >= success_reward_threshold). Default False — only incorrect samples get feedback.
+        feedback_prompt_template (str): Template for querying the teacher.
+            Available variables: {prompt}, {response}, {feedback}.
+    """
+
+    enabled: bool = False
+    server_ip: str = "127.0.0.1"
+    server_port: int = 15555
+    n_server_workers: int = 1
+    max_tokens: int = 16384
+    temperature: float = 0.7
+    max_feedback_prompt_len: int = 4096
+    feedback_on_correct: bool = False
+    feedback_prompt_template: str = (
+        "Here is a student's response to a question.\n"
+        "Question: {prompt}\n"
+        "Response: {response}\n"
+        "Environment feedback: {feedback}\n"
+        "Please inspect the model response and any thinking process before that, and provide concise "
+        "feedback on errors and how to improve. Don't answer the question directly. Focus on pointing "
+        "out the mistakes in the thinking and response.\n"
+    )
+
 
 @dataclass
 class SelfDistillationConfig(BaseConfig):
@@ -38,8 +76,11 @@ class SelfDistillationConfig(BaseConfig):
         success_reward_threshold (float): Minimum sequence reward to be considered successful.
         teacher_regularization (str): Teacher regularization mode. Options: "ema", "trust-region".
         teacher_update_rate (float): EMA update rate for teacher weights, or trust-region mixing coefficient.
-        distillation_topk (Optional[int]): If set, use top-k logits for distillation.
-        distillation_add_tail (bool): Whether to add a tail bucket for top-k distillation.
+        distillation_topk (Optional[int]): If set, use top-k logits for distillation. Mutually exclusive with distillation_top_p.
+        distillation_top_p (Optional[float]): If set, use nucleus (top-p) sampling for distillation. Mutually exclusive with distillation_topk.
+        distillation_max_k (Optional[int]): Maximum number of tokens to keep when using top-p (memory cap). Only used with distillation_top_p.
+        distillation_add_tail (bool): Whether to add a tail bucket for top-k/top-p distillation.
+        distillation_token_selector (str): Who determines the token support set. Options: "student", "teacher", "union".
         max_reprompt_len (int): Maximum length of the reprompted prompt.
         reprompt_truncation (str): Truncation method for the reprompted prompt (recommended to use "right" or "error").
         dont_reprompt_on_self_success (bool): Whether to not reprompt on self-success.
@@ -49,10 +90,14 @@ class SelfDistillationConfig(BaseConfig):
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
         solution_template (str): Template for formatting solution section. Uses {successful_previous_attempt} placeholder.
         feedback_template (str): Template for formatting feedback section. Uses {feedback_raw} placeholder.
+        include_previous_attempt (bool): Whether to include the student's own previous (failed) attempt in the reprompt.
+        previous_attempt_template (str): Template for the previous attempt section. Uses {previous_attempt_raw} placeholder.
         include_environment_feedback (bool): Whether to include environment feedback in reprompting for wrong attempts.
         environment_feedback_only_without_solution (bool): If True, only use feedback when no solution is available (ignore feedback when solution exists).
-        reprompt_template_feedback (str): Template for reprompting with feedback but no solution.
-        reprompt_template_feedback_solution (str): Template for reprompting with both feedback and solution.
+        include_teacher_feedback (bool): Whether to include teacher model feedback in reprompting.
+        teacher_feedback_only_without_solution (bool): If True, only use teacher feedback when no solution is available.
+        teacher_feedback_template (str): Template for the teacher feedback section. Uses {teacher_feedback_raw} placeholder.
+        teacher (TeacherFeedbackConfig): Configuration for the teacher feedback server.
     """
 
     full_logit_distillation: bool = True
@@ -61,7 +106,10 @@ class SelfDistillationConfig(BaseConfig):
     teacher_regularization: str = "ema"
     teacher_update_rate: float = 0.05
     distillation_topk: Optional[int] = None
+    distillation_top_p: Optional[float] = None
+    distillation_max_k: Optional[int] = None
     distillation_add_tail: bool = True
+    distillation_token_selector: str = "student"
     max_reprompt_len: int = 10240
     reprompt_truncation: str = "right"
     dont_reprompt_on_self_success: bool = False
@@ -69,7 +117,7 @@ class SelfDistillationConfig(BaseConfig):
     is_clip: Optional[float] = None
     remove_thinking_in_loss: bool = False
     reprompt_template: str = (
-        "{prompt}{solution}{feedback}\n\n"
+        "{prompt}{previous_attempt}{solution}{feedback}{teacher_feedback}\n\n"
         "Correctly solve the original question.\n"
     )
     solution_template: str = (
@@ -82,8 +130,22 @@ class SelfDistillationConfig(BaseConfig):
         "The following is feedback from your unsuccessful earlier attempt:\n\n"
         "{feedback_raw}\n\n"
     )
+    include_previous_attempt: bool = False
+    previous_attempt_template: str = (
+        "\n"
+        "The following is your previous attempt:\n\n"
+        "{previous_attempt_raw}\n\n"
+    )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
+    include_teacher_feedback: bool = False
+    teacher_feedback_only_without_solution: bool = False
+    teacher_feedback_template: str = (
+        "\n"
+        "The following is feedback from the teacher model:\n\n"
+        "{teacher_feedback_raw}"
+    )
+    teacher: TeacherFeedbackConfig = field(default_factory=TeacherFeedbackConfig)
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -101,6 +163,24 @@ class SelfDistillationConfig(BaseConfig):
         if self.distillation_topk is not None and self.distillation_topk <= 0:
             raise ValueError(
                 f"self_distillation.distillation_topk must be a positive integer, got {self.distillation_topk}"
+            )
+        if self.distillation_top_p is not None and not (0.0 < self.distillation_top_p <= 1.0):
+            raise ValueError(
+                f"self_distillation.distillation_top_p must be in (0, 1], got {self.distillation_top_p}"
+            )
+        if self.distillation_topk is not None and self.distillation_top_p is not None:
+            raise ValueError(
+                "self_distillation.distillation_topk and distillation_top_p are mutually exclusive"
+            )
+        if self.distillation_max_k is not None and self.distillation_max_k <= 0:
+            raise ValueError(
+                f"self_distillation.distillation_max_k must be a positive integer, got {self.distillation_max_k}"
+            )
+        valid_token_selectors = ["student", "teacher", "union"]
+        if self.distillation_token_selector not in valid_token_selectors:
+            raise ValueError(
+                f"self_distillation.distillation_token_selector must be one of "
+                f"{valid_token_selectors}, got {self.distillation_token_selector}"
             )
         if self.is_clip is not None and self.is_clip <= 0:
             raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")

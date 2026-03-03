@@ -769,6 +769,7 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/pg_loss": 0.0,
             "actor/kl_loss": 0.0,
         }
+        _sd_token_values = []  # collect token-level self-distillation loss for distribution plot
         did_update = False
         _token_loss_dumped = False  # ensure we only dump once per update_policy call
         for _ in range(self.config.ppo_epochs):
@@ -854,13 +855,14 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_outputs = self._forward_micro_batch(
                                 teacher_inputs,
                                 temperature=temperature,
-                                calculate_entropy=False,
+                                calculate_entropy=True,
                                 return_all_logps=return_all_logps,
                                 distill_topk=distill_topk,
                                 topk_indices=student_topk_indices,
                                 module=teacher_model,
                             )
                         teacher_log_prob = teacher_outputs["log_probs"]
+                        teacher_entropy = teacher_outputs.get("entropys")
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
 
@@ -896,11 +898,18 @@ class DataParallelPPOActor(BasePPOActor):
                         )
 
                         pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0
+                        if teacher_entropy is not None:
+                            pg_metrics["self_distillation/teacher_entropy"] = agg_loss(
+                                loss_mat=teacher_entropy, loss_mask=distill_response_mask, loss_agg_mode=loss_agg_mode
+                            ).detach().item()
                         # Extract per_token_loss before merging into metrics — it's a full
                         # CUDA tensor only needed for the token-level dump below.  Leaving it
                         # in the returned metrics dict causes a Ray deserialization error on
                         # the (GPU-less) driver.
                         _per_token_loss = pg_metrics.pop("per_token_loss", None)
+                        if _per_token_loss is not None:
+                            _sd_masked = _per_token_loss.detach()[distill_response_mask.bool()].cpu().numpy()
+                            _sd_token_values.append(_sd_masked)
                         micro_batch_metrics.update(pg_metrics)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -1008,4 +1017,10 @@ class DataParallelPPOActor(BasePPOActor):
         self._update_step += 1
         if did_update:
             self._update_teacher()
+        # Store token-level self-distillation loss histogram as (counts, bin_edges) numpy arrays
+        # so it can be serialized through Ray without issues.
+        if _sd_token_values:
+            import numpy as np
+            all_sd = np.concatenate(_sd_token_values)
+            metrics["actor/sd_token_dist"] = all_sd.tolist()
         return metrics

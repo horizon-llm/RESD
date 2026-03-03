@@ -211,6 +211,25 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  use_stream_trainer: False
+
+  # Maximum number of on-policy update rounds per data batch (stream trainer)
+  max_updates_per_batch: 1
+
+  # Minimum number of on-policy update rounds per data batch (stream trainer)
+  min_updates_per_batch: 1
+
+  # Early-stop threshold: stop updating if reward improvement drops below this value
+  early_stop_improvement_threshold: 0.0
+
+  forget_eval:
+
+    # eval every N global steps (0 = disabled)
+    eval_freq: 1
+
+    # Number of past batches to keep for forget evaluation
+    buffer_size: 100
+
 # profiler configs
 global_profiler:
 

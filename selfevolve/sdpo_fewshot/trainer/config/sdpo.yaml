@@ -22,6 +22,9 @@ actor_rollout_ref:
     self_distillation:
       max_reprompt_len: 10240
       is_clip: 2.0
+      teacher:
+        max_tokens: 32768
+        max_feedback_prompt_len: 32768
     optim:
       lr: 1e-5
   rollout:
