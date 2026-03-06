@@ -23,22 +23,14 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
-        --num_data $NUM_DATA \
-        --output data/finer/train_${NUM_DATA}.parquet
-python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
-        --output data/finer/val.parquet
+python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/privacy --num_data $NUM_DATA
 
-train_path=data/finer/train_${NUM_DATA}.parquet
-val_path=data/finer/val.parquet
+train_path=selfevolve/sdpo/datasets/privacy/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo/datasets/privacy/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=finer
+TASK=privacy
 export TASK
 
 # === optim ===
@@ -78,7 +70,7 @@ concise_method=${concise_method:-"reset"} # method for concising context
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 
-project_name='sdpo_finer'
+project_name='sdpo_privacy'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -164,9 +156,8 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
-    custom_reward_function.name=compute_score_count
-    +custom_reward_function.reward_kwargs.correctness_feedback=True
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/privacy.py
+    custom_reward_function.name=compute_score
 )
 
 MODEL=(

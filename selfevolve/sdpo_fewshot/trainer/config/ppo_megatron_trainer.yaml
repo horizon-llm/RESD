@@ -169,6 +169,9 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Directory for logging reprompt texts; no dump if null
+  reprompt_data_dir: null
+
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto

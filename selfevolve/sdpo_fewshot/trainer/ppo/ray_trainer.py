@@ -68,6 +68,19 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
+from ...context_updater import ACEContextUpdater
+from ...context_updater.prompts import TEACHER_PROMPT
+from ...teacher import TeacherClient
+
+
+def _get_context_updater_cfg_value(self_distillation_cfg, nested_key: str, legacy_key: str, default):
+    if self_distillation_cfg is None:
+        return default
+    nested_cfg = self_distillation_cfg.get("context_updater", None)
+    if nested_cfg is not None:
+        return nested_cfg.get(nested_key, default)
+    return self_distillation_cfg.get(legacy_key, default)
+
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
     """Apply KL penalty to the token-level rewards.
@@ -276,6 +289,8 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
+        assert not self.config.reward_model.launch_reward_fn_async, "Asynchronous reward function is currently not supported in RayPPOTrainer."
+
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -314,6 +329,31 @@ class RayPPOTrainer:
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+        # ACE context updater (off by default — enabled via self_distillation.context_updater.enabled)
+        sd_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        self.use_context_updater = _get_context_updater_cfg_value(
+            sd_cfg,
+            nested_key="enabled",
+            legacy_key="use_context_updater",
+            default=False,
+        )
+        self.context_updater = ACEContextUpdater(config) if self.use_context_updater else None
+
+        _teacher_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("teacher", None)
+        if _teacher_cfg and _teacher_cfg.get("enabled", False):
+            self.teacher_client = TeacherClient(
+                server_ip=_teacher_cfg.server_ip,
+                server_port=_teacher_cfg.server_port,
+                n_server_workers=_teacher_cfg.n_server_workers,
+                max_tokens=_teacher_cfg.max_tokens,
+                temperature=_teacher_cfg.temperature,
+                only_response=True,
+            )
+            self.n_teacher_workers = _teacher_cfg.n_server_workers
+        else:
+            self.teacher_client = None
+            self.n_teacher_workers = 0
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -457,6 +497,57 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
+    def _log_reprompt_data(
+        self, batch: DataProto, timing_raw: dict, reprompt_data_dir: str
+    ):
+        """Log reprompt texts to disk as JSONL for all samples.
+
+        Token-level log probs and distillation loss statistics are already
+        dumped by dp_actor.py (controlled by ``token_loss_dump_n``).
+
+        Args:
+            batch: The batch containing reprompt data (must have teacher_input_ids).
+            timing_raw: Timing information for profiling.
+            reprompt_data_dir: Directory path to save the reprompt data.
+        """
+        if "teacher_input_ids" not in batch.batch:
+            return
+
+        with marked_timer("dump_reprompt_data", timing_raw, color="green"):
+            teacher_input_ids = batch.batch["teacher_input_ids"]
+            responses = batch.batch["responses"]
+            reprompt_len = teacher_input_ids.shape[1] - responses.shape[1]
+            reprompt_ids = teacher_input_ids[:, :reprompt_len]
+
+            reprompt_texts = self.tokenizer.batch_decode(reprompt_ids, skip_special_tokens=True)
+            prompt_texts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            response_texts = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+            sd_mask = batch.batch["self_distillation_mask"].cpu().tolist()
+
+            os.makedirs(reprompt_data_dir, exist_ok=True)
+            filename = os.path.join(reprompt_data_dir, f"{self.global_steps}.jsonl")
+
+            lines = []
+            n = len(reprompt_texts)
+            for i in range(n):
+                entry = {
+                    "reprompt": reprompt_texts[i],
+                    "prompt": prompt_texts[i],
+                    "response": response_texts[i],
+                    "score": scores[i],
+                    "self_distillation_mask": sd_mask[i],
+                    "step": self.global_steps,
+                }
+                if "uid" in batch.non_tensor_batch:
+                    entry["uid"] = str(batch.non_tensor_batch["uid"][i])
+                lines.append(json.dumps(entry, ensure_ascii=False))
+
+            with open(filename, "w") as f:
+                f.write("\n".join(lines) + "\n")
+
+            print(f"Dumped reprompt data to {filename}")
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -481,6 +572,13 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _log_playbook(self, playbook: str, step: int):
+        """Log the current playbook text to the configured logger (wandb only)."""
+        if "wandb" in self.config.trainer.logger:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"playbook/text": wandb.Html(f"<pre>{playbook}</pre>")}, step=step)
+
     def _log_teacher_prompt(self, messages: list, step: int):
         """Log a sample teacher prompt to wandb under self_distillation/teacher_prompt."""
         if "wandb" in self.config.trainer.logger:
@@ -492,6 +590,33 @@ class RayPPOTrainer:
                     add_generation_prompt=True,
                 )
                 wandb.log({"self_distillation/teacher_prompt": wandb.Html(f"<pre>{sample}</pre>")}, step=step)
+
+    def _log_teacher_feedback(self, batch: DataProto, teacher_feedback_list: list, step: int):
+        """Log one teacher feedback sample to wandb for debugging."""
+        if "wandb" not in self.config.trainer.logger:
+            return
+        import wandb
+        if wandb.run is None:
+            return
+
+        teacher_cfg = self.config.actor_rollout_ref.actor.self_distillation.teacher
+        batch_size = batch.batch.batch_size[0]
+        prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+
+        for i in range(batch_size):
+            if teacher_feedback_list[i] is not None:
+                env_fb = ""
+                if "feedback" in batch.non_tensor_batch:
+                    env_fb = batch.non_tensor_batch["feedback"][i] or ""
+                feedback_prompt = teacher_cfg.feedback_prompt_template.format(
+                    prompt=prompts[i], response=responses[i], feedback=env_fb,
+                )
+                wandb.log({
+                    "teacher/feedback_prompt": wandb.Html(f"<pre>{feedback_prompt}</pre>"),
+                    "teacher/feedback_response": wandb.Html(f"<pre>{teacher_feedback_list[i]}</pre>"),
+                }, step=step)
+                break
 
     def _compute_reward_legacy(
         self,
@@ -595,6 +720,79 @@ class RayPPOTrainer:
         if remove_thinking_from_demonstration:
             solution_str = self._remove_thinking_trace(solution_str)
         return solution_str
+
+    def _submit_teacher_feedback(
+        self,
+        batch: DataProto,
+        env_feedback_list: list | None = None,
+        reward_tensor: torch.Tensor | None = None,
+    ) -> tuple:
+        """Non-blocking submit of teacher feedback requests."""
+        teacher_cfg = self.config.actor_rollout_ref.actor.self_distillation.teacher
+        sd_cfg = self.config.actor_rollout_ref.actor.self_distillation
+        batch_size = batch.batch.batch_size[0]
+
+        feedback_on_correct = teacher_cfg.get("feedback_on_correct", False)
+        if reward_tensor is not None and not feedback_on_correct:
+            success_threshold = sd_cfg.get("success_reward_threshold", 0.5)
+            seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
+            request_indices = [i for i in range(batch_size) if seq_scores[i] < success_threshold]
+        else:
+            request_indices = list(range(batch_size))
+
+        if not request_indices:
+            return [], [], 1
+
+        prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        env_fb = env_feedback_list or [None] * batch_size
+
+        tmpl = teacher_cfg.feedback_prompt_template
+        request_texts = [
+            tmpl.format(prompt=prompts[i], response=responses[i], feedback=env_fb[i] or "")
+            for i in request_indices
+        ]
+
+        encoded = self.tokenizer(
+            request_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=teacher_cfg.get("max_feedback_prompt_len", 4096),
+        )
+        input_ids = encoded["input_ids"]
+        attn = encoded["attention_mask"].bool()
+        n_submit = len(request_indices)
+        ids_list = [input_ids[i][attn[i]].tolist() for i in range(n_submit)]
+
+        mbs = max(1, n_submit // self.n_teacher_workers)
+        futures = []
+        for start in range(0, n_submit, mbs):
+            futures.append(self.teacher_client.submit(ids_list[start : start + mbs]))
+
+        return request_indices, futures, mbs
+
+    def _resolve_teacher_feedback(
+        self,
+        teacher_futures: tuple,
+        batch_size: int,
+    ) -> list:
+        """Blocking wait for teacher feedback futures and decode responses."""
+        request_indices, futures, mbs = teacher_futures
+        result = [None] * batch_size
+
+        for fut_idx, future in enumerate(futures):
+            start = fut_idx * mbs
+            try:
+                teacher_responses, _, _ = future.result()
+                for j, resp_ids in enumerate(teacher_responses):
+                    batch_idx = request_indices[start + j]
+                    token_ids = resp_ids.tolist() if hasattr(resp_ids, "tolist") else resp_ids
+                    result[batch_idx] = self._remove_thinking_trace(self.tokenizer.decode(token_ids, skip_special_tokens=True))
+            except Exception as e:
+                print(f"[teacher_feedback] future {fut_idx} failed: {e}")
+
+        return result
     
     def _maybe_build_self_distillation_batch(
         self,
@@ -629,6 +827,31 @@ class RayPPOTrainer:
                 if raw_teacher_feedback[i] and isinstance(raw_teacher_feedback[i], str) and raw_teacher_feedback[i].strip():
                     teacher_feedback_list[i] = raw_teacher_feedback[i]
 
+        # --- ACE Context Update (only when use_context_updater is enabled) ---
+        previous_trials = None
+        reflection_list = None
+        playbook_stats = None
+        if self.use_context_updater:
+            print(f"[ACE] Updating model weights before context update (step={self.global_steps})...")
+            self.checkpoint_manager.update_weights()
+
+            print(f"[ACE] Running context update (step={self.global_steps})...")
+            acc_list = None
+            if reward_extra_infos_dict is not None:
+                acc_list = reward_extra_infos_dict.get("acc", None)
+            context_update_results = self.context_updater.update(
+                batch, self.async_rollout_manager, self.tokenizer, feedback_list,
+                teacher_feedback_list=teacher_feedback_list,
+                acc_list=acc_list,
+            )
+            previous_trials = context_update_results.get("response_texts", None)
+            reflection_list = context_update_results.get("reflection_texts", None)
+            playbook_stats = context_update_results.get("final_stats", None)
+            print(f"[ACE] Context update complete (step={self.global_steps}).")
+            self._log_playbook(self.context_updater.playbook, self.global_steps)
+
+            self.checkpoint_manager.sleep_replicas()
+
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
         solution_strs = [
             self._get_solution(
@@ -655,45 +878,108 @@ class RayPPOTrainer:
             use_feedback = has_feedback and (not feedback_only_without_solution or not has_solution)
             use_teacher_feedback = has_teacher_feedback and (not teacher_feedback_only_without_solution or not has_solution)
 
-            # build previous attempt section (only when feedback or teacher feedback is present)
-            previous_attempt_section = ""
-            if include_previous_attempt and (use_feedback or use_teacher_feedback):
-                previous_attempt_section = self_distillation_cfg.previous_attempt_template.format(
-                    previous_attempt_raw=response_texts[i]
+            # ACE-specific flags (off by default)
+            use_reflection = (
+                self.use_context_updater
+                and reflection_list is not None
+                and reflection_list[i] is not None
+                and _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_reflection_in_teacher_prompt",
+                    legacy_key="use_reflection_in_teacher_prompt",
+                    default=False,
                 )
+            )
+            use_playbook = (
+                self.use_context_updater
+                and self.context_updater.playbook != self.context_updater.get_empty_playbook()
+                and _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_playbook_in_teacher_prompt",
+                    legacy_key="use_playbook_in_teacher_prompt",
+                    default=False,
+                )
+            )
 
-            # build solution section
-            solution_section = ""
-            if has_solution:
-                solution_section = self_distillation_cfg.solution_template.format(
-                    successful_previous_attempt=solution_strs[i]
-                )
+            # When context updater is active, use TEACHER_PROMPT; otherwise use reprompt_template
+            if self.use_context_updater:
+                # build solution section
+                solution_section = ""
+                if has_solution:
+                    solution_section = self_distillation_cfg.solution_template.format(
+                        successful_previous_attempt=solution_strs[i]
+                    )
 
-            # build feedback section
-            feedback_section = ""
-            if use_feedback:
-                feedback_section = self_distillation_cfg.feedback_template.format(
-                    feedback_raw=feedback_list[i]
-                )
+                # build feedback section
+                feedback_section = ""
+                if use_feedback:
+                    feedback_section = self_distillation_cfg.feedback_template.format(
+                        feedback_raw=feedback_list[i]
+                    )
 
-            # build teacher feedback section (independent of env feedback)
-            teacher_feedback_section = ""
-            if use_teacher_feedback:
-                teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
-                    teacher_feedback_raw=teacher_feedback_list[i]
-                )
+                # build teacher feedback section
+                teacher_feedback_section = ""
+                if use_teacher_feedback:
+                    teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
+                        teacher_feedback_raw=teacher_feedback_list[i]
+                    )
 
-            # combine all sections into the reprompt
-            if use_feedback or use_teacher_feedback or has_solution:
-                reprompt_text = self_distillation_cfg.reprompt_template.format(
-                    prompt=prompt_texts[i],
-                    previous_attempt=previous_attempt_section,
-                    solution=solution_section,
-                    feedback=feedback_section,
-                    teacher_feedback=teacher_feedback_section,
-                )
+                if use_feedback or has_solution or use_reflection:
+                    reprompt_text = TEACHER_PROMPT.format(
+                        prompt=prompt_texts[i],
+                        previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
+                        solution=solution_section,
+                        feedback=feedback_section,
+                        teacher_feedback=teacher_feedback_section,
+                        reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
+                        playbook=self.context_updater.playbook if use_playbook else "",
+                    )
+                else:
+                    reprompt_text = prompt_texts[i]
             else:
-                reprompt_text = prompt_texts[i]
+                # Original behavior: use config-driven reprompt_template
+                # build previous attempt section (only when feedback or teacher feedback is present)
+                previous_attempt_section = ""
+                previous_attempt_str = response_texts[i]
+                if self_distillation_cfg.get("remove_thinking_from_demonstration", False):
+                    previous_attempt_str = self._remove_thinking_trace(previous_attempt_str)
+                if include_previous_attempt and (use_feedback or use_teacher_feedback):
+                    previous_attempt_section = self_distillation_cfg.previous_attempt_template.format(
+                        previous_attempt_raw=previous_attempt_str
+                    )
+
+                # build solution section
+                solution_section = ""
+                if has_solution:
+                    solution_section = self_distillation_cfg.solution_template.format(
+                        successful_previous_attempt=solution_strs[i]
+                    )
+
+                # build feedback section
+                feedback_section = ""
+                if use_feedback:
+                    feedback_section = self_distillation_cfg.feedback_template.format(
+                        feedback_raw=feedback_list[i]
+                    )
+
+                # build teacher feedback section (independent of env feedback)
+                teacher_feedback_section = ""
+                if use_teacher_feedback:
+                    teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
+                        teacher_feedback_raw=teacher_feedback_list[i]
+                    )
+
+                # combine all sections into the reprompt
+                if use_feedback or use_teacher_feedback or has_solution:
+                    reprompt_text = self_distillation_cfg.reprompt_template.format(
+                        prompt=prompt_texts[i],
+                        previous_attempt=previous_attempt_section,
+                        solution=solution_section,
+                        feedback=feedback_section,
+                        teacher_feedback=teacher_feedback_section,
+                    )
+                else:
+                    reprompt_text = prompt_texts[i]
 
             return system_messages + [
                 {"role": "user", "content": reprompt_text},
@@ -731,9 +1017,36 @@ class RayPPOTrainer:
             for i in range(batch_size)
         ]
 
+        # ACE-specific usage tracking
+        use_reflection_in_teacher_prompt = _get_context_updater_cfg_value(
+            self_distillation_cfg,
+            nested_key="use_reflection_in_teacher_prompt",
+            legacy_key="use_reflection_in_teacher_prompt",
+            default=False,
+        )
+        reflection_used = [
+            self.use_context_updater and reflection_list is not None
+            and reflection_list[i] and use_reflection_in_teacher_prompt
+            for i in range(batch_size)
+        ]
+        use_playbook_in_teacher_prompt = _get_context_updater_cfg_value(
+            self_distillation_cfg,
+            nested_key="use_playbook_in_teacher_prompt",
+            legacy_key="use_playbook_in_teacher_prompt",
+            default=False,
+        )
+        playbook_used = [
+            self.use_context_updater
+            and self.context_updater.playbook != self.context_updater.get_empty_playbook()
+            and use_playbook_in_teacher_prompt
+        ] * batch_size
+
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
         self_distillation_mask = torch.tensor(
-            [solution_strs[i] is not None or feedback_used[i] or teacher_feedback_used[i] for i in range(batch_size)],
+            [
+                solution_strs[i] is not None or feedback_used[i] or teacher_feedback_used[i] or reflection_used[i]
+                for i in range(batch_size)
+            ],
             dtype=torch.float32,
             device=device
         )
@@ -757,7 +1070,16 @@ class RayPPOTrainer:
             "self_distillation/reprompt_len_mean": reprompt_lens.mean().item(),
             "self_distillation/reprompt_len_max": reprompt_lens.max().item(),
             "self_distillation/reprompt_truncated_fraction": (reprompt_lens == self_distillation_cfg.max_reprompt_len).float().mean().item(),
+            "self_distillation/playbook_used_fraction": sum(playbook_used) / batch_size,
+            "self_distillation/reflection_used_fraction": sum(reflection_used) / batch_size,
         }
+        if playbook_stats is not None:
+            metrics.update({
+                "playbook/total_bullets": playbook_stats.get("total_bullets", 0),
+                "playbook/high_performing": playbook_stats.get("high_performing", 0),
+                "playbook/problematic": playbook_stats.get("problematic", 0),
+                "playbook/unused": playbook_stats.get("unused", 0),
+            })
         return DataProto.from_dict(tensors={
             "teacher_input_ids": teacher_input_ids,
             "teacher_attention_mask": teacher_attention_mask,
@@ -980,6 +1302,31 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
         return metric_dict
+
+    def _update_best_val(self, val_metrics: dict, step: int) -> dict:
+        """Track best validation performance so far.
+
+        Looks for val-core keys and updates the best seen value for each.
+        Returns a dict of best-val metrics to be logged.
+        """
+        if not hasattr(self, "_best_val"):
+            self._best_val: dict[str, tuple[float, int]] = {}
+
+        best_metrics: dict[str, float] = {}
+        for key, value in val_metrics.items():
+            if not key.startswith("val-core/"):
+                continue
+            prev_best, _ = self._best_val.get(key, (float("-inf"), -1))
+            if value >= prev_best:
+                self._best_val[key] = (value, step)
+            best_val, best_step = self._best_val[key]
+            best_key = key.replace("val-core/", "val-best/")
+            best_metrics[best_key] = best_val
+            best_metrics[best_key + "/step"] = best_step
+
+        if best_metrics:
+            pprint(f"[step {step}] Best validation so far: {best_metrics}")
+        return best_metrics
 
     def _merge_validation_results(self, result_a, result_b):
         if result_a is None and result_b is None:
@@ -1244,6 +1591,14 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # save context updater (playbook) state
+        if self.use_context_updater and self.context_updater is not None:
+            context_updater_path = os.path.join(local_global_step_folder, "context_updater.json")
+            import json
+            with open(context_updater_path, "w") as f:
+                json.dump(self.context_updater.state_dict(), f, indent=2)
+            print(f"Saved context updater state to {context_updater_path}")
+
         # latest checkpointed iteration tracker (for atomic usage)
         if (
             hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
@@ -1316,6 +1671,18 @@ class RayPPOTrainer:
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # load context updater (playbook) state
+        if self.use_context_updater and self.context_updater is not None:
+            context_updater_path = os.path.join(global_step_folder, "context_updater.json")
+            if os.path.exists(context_updater_path):
+                import json
+                with open(context_updater_path, "r") as f:
+                    context_updater_state = json.load(f)
+                self.context_updater.load_state_dict(context_updater_state)
+                print(f"Restored context updater state from {context_updater_path}")
+            else:
+                print(f"Warning: No context updater state found at {context_updater_path}, starting with empty playbook")
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
@@ -1600,6 +1967,8 @@ class RayPPOTrainer:
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
+            best_val_metrics = self._update_best_val(val_metrics, step=self.global_steps)
+            val_metrics.update(best_val_metrics)
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
@@ -1710,6 +2079,9 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    # teacher_futures will be submitted after reward so env feedback can be included.
+                    teacher_futures = None
+
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1752,6 +2124,16 @@ class RayPPOTrainer:
                     if reward_extra_infos_dict:
                         metrics.update(
                             self._compute_train_batch_metrics(reward_extra_infos_dict, prefix="train/pre_update")
+                        )
+                    
+                    # Kick off teacher feedback request now that env feedback is available.
+                    # Overlaps with old_log_prob and ref_log_prob GPU computation below.
+                    if self.teacher_client is not None:
+                        env_fb = list(reward_extra_infos_dict.get("feedback", [None] * batch.batch.batch_size[0]))
+                        teacher_futures = self._submit_teacher_feedback(
+                            batch,
+                            env_feedback_list=env_fb,
+                            reward_tensor=reward_tensor,
                         )
 
                     # Operating Mode Selection:
@@ -1814,6 +2196,25 @@ class RayPPOTrainer:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
                             batch = batch.union(values)
+
+                    if self.teacher_client is not None:
+                        if teacher_futures is None:
+                            env_fb = list(reward_extra_infos_dict.get("feedback", [None] * batch.batch.batch_size[0]))
+                            teacher_futures = self._submit_teacher_feedback(
+                                batch,
+                                env_feedback_list=env_fb,
+                                reward_tensor=None,
+                            )
+                        with marked_timer("teacher_feedback_wait", timing_raw):
+                            reward_extra_infos_dict["teacher_feedback"] = self._resolve_teacher_feedback(
+                                teacher_futures,
+                                batch.batch.batch_size[0],
+                            )
+                            self._log_teacher_feedback(
+                                batch,
+                                reward_extra_infos_dict["teacher_feedback"],
+                                self.global_steps,
+                            )
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -1911,18 +2312,80 @@ class RayPPOTrainer:
 
                         actor_raw_metrics = actor_output.meta_info["metrics"]
                         sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
+                        sd_token_by_pos = actor_raw_metrics.pop("actor/sd_token_by_pos", None)
+                        sd_weight_by_pos = actor_raw_metrics.pop("actor/sd_weight_by_pos", None)
                         actor_output_metrics = reduce_metrics(actor_raw_metrics)
-                        if sd_token_hist is not None and "wandb" in self.config.trainer.logger:
+                        if "wandb" in self.config.trainer.logger:
                             import wandb
                             if wandb.run is not None:
-                                # sd_token_hist may be a list-of-lists (one per DP worker); flatten it
-                                if sd_token_hist and isinstance(sd_token_hist[0], (list, tuple)):
-                                    flat = [v for sublist in sd_token_hist for v in sublist]
-                                else:
-                                    flat = sd_token_hist
-                                actor_output_metrics["actor/sd_token_dist"] = wandb.Histogram(
-                                    sequence=flat
-                                )
+                                if sd_token_hist is not None:
+                                    # sd_token_hist may be a list-of-lists (one per DP worker); flatten it
+                                    if sd_token_hist and isinstance(sd_token_hist[0], (list, tuple)):
+                                        flat = [v for sublist in sd_token_hist for v in sublist]
+                                    else:
+                                        flat = sd_token_hist
+                                    actor_output_metrics["actor/sd_token_dist"] = wandb.Histogram(
+                                        sequence=flat
+                                    )
+                                if sd_token_by_pos is not None:
+                                    # sd_token_by_pos is [values_list, positions_list] or list-of-such from DP workers
+                                    if sd_token_by_pos and isinstance(sd_token_by_pos[0], (list, tuple)) and len(sd_token_by_pos) == 2 and isinstance(sd_token_by_pos[0][0], (int, float)):
+                                        all_vals, all_pos = np.array(sd_token_by_pos[0]), np.array(sd_token_by_pos[1])
+                                    else:
+                                        # list-of-[vals, pos] from multiple DP workers
+                                        all_vals = np.concatenate([np.array(pair[0]) for pair in sd_token_by_pos])
+                                        all_pos = np.concatenate([np.array(pair[1]) for pair in sd_token_by_pos])
+                                    # Bin by position and compute mean sd_token per bin
+                                    max_pos = int(all_pos.max()) if len(all_pos) > 0 else 0
+                                    n_bins = min(max_pos, 64)
+                                    if n_bins > 0:
+                                        bin_edges = np.linspace(1, max_pos + 1, n_bins + 1)
+                                        bin_indices = np.digitize(all_pos, bin_edges) - 1
+                                        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+                                        bin_means = np.full(n_bins, np.nan)
+                                        bin_stds = np.full(n_bins, np.nan)
+                                        for b in range(n_bins):
+                                            mask = bin_indices == b
+                                            if mask.any():
+                                                bin_means[b] = all_vals[mask].mean()
+                                                bin_stds[b] = all_vals[mask].std()
+                                        bin_centers = ((bin_edges[:-1] + bin_edges[1:]) / 2).astype(int)
+                                        # Log as a line plot table
+                                        table = wandb.Table(
+                                            data=[[int(c), float(m), float(s)] for c, m, s in zip(bin_centers, bin_means, bin_stds) if not np.isnan(m)],
+                                            columns=["position", "mean_sd_loss", "std_sd_loss"],
+                                        )
+                                        actor_output_metrics["actor/sd_token_by_position"] = wandb.plot.line(
+                                            table, "position", "mean_sd_loss",
+                                            title="SD Token Loss vs Response Position",
+                                        )
+                                if sd_weight_by_pos is not None:
+                                    # sd_weight_by_pos is [weights_list, positions_list] or list-of-such from DP workers
+                                    if sd_weight_by_pos and isinstance(sd_weight_by_pos[0], (list, tuple)) and len(sd_weight_by_pos) == 2 and isinstance(sd_weight_by_pos[0][0], (int, float)):
+                                        all_weights, all_pos_w = np.array(sd_weight_by_pos[0]), np.array(sd_weight_by_pos[1])
+                                    else:
+                                        all_weights = np.concatenate([np.array(pair[0]) for pair in sd_weight_by_pos])
+                                        all_pos_w = np.concatenate([np.array(pair[1]) for pair in sd_weight_by_pos])
+                                    max_pos_w = int(all_pos_w.max()) if len(all_pos_w) > 0 else 0
+                                    n_bins_w = min(max_pos_w, 64)
+                                    if n_bins_w > 0:
+                                        bin_edges_w = np.linspace(1, max_pos_w + 1, n_bins_w + 1)
+                                        bin_indices_w = np.digitize(all_pos_w, bin_edges_w) - 1
+                                        bin_indices_w = np.clip(bin_indices_w, 0, n_bins_w - 1)
+                                        bin_means_w = np.full(n_bins_w, np.nan)
+                                        for b in range(n_bins_w):
+                                            mask = bin_indices_w == b
+                                            if mask.any():
+                                                bin_means_w[b] = all_weights[mask].mean()
+                                        bin_centers_w = ((bin_edges_w[:-1] + bin_edges_w[1:]) / 2).astype(int)
+                                        table_w = wandb.Table(
+                                            data=[[int(c), float(m)] for c, m in zip(bin_centers_w, bin_means_w) if not np.isnan(m)],
+                                            columns=["position", "mean_sd_weight"],
+                                        )
+                                        actor_output_metrics["actor/sd_weight_by_position"] = wandb.plot.line(
+                                            table_w, "position", "mean_sd_weight",
+                                            title="SD Token Weight vs Response Position",
+                                        )
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
@@ -1930,12 +2393,19 @@ class RayPPOTrainer:
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
+                    # Log reprompt texts if enabled
+                    reprompt_data_dir = self.config.trainer.get("reprompt_data_dir", None)
+                    if reprompt_data_dir:
+                        self._log_reprompt_data(batch, timing_raw, reprompt_data_dir)
+
                 # validate
                 if self.config.trainer.test_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
+                        best_val_metrics = self._update_best_val(val_metrics, step=self.global_steps)
+                        val_metrics.update(best_val_metrics)
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)

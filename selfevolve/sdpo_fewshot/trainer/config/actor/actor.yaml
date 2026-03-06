@@ -89,6 +89,16 @@ self_distillation:
   # Whether to add a tail bucket when using distillation_topk
   distillation_add_tail: True
 
+  # Top-p (nucleus) threshold for logit distillation; null uses top-k instead
+  # Mutually exclusive with distillation_topk
+  distillation_top_p: null
+
+  # Maximum number of tokens to keep when using top-p (memory cap); null means no limit
+  distillation_max_k: null
+
+  # Who determines the support set: "student", "teacher", or "union"
+  distillation_token_selector: "student"
+
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
   alpha: 0.5 
 
@@ -124,6 +134,39 @@ self_distillation:
   # IS clip for loss; null disables IS weighting
   is_clip: 2
 
+  # ACE context updater configuration
+  context_updater:
+
+    # Enable ACE context updater flow during self-distillation
+    enabled: False
+
+    # How often to concise the playbook (in number of context updates)
+    concise_frequency: 4
+
+    # Maximum number of bullets to keep in the playbook; null disables bullet-count trigger
+    max_bullets: null
+
+    # Playbook concise strategy: "reset" or "prioritized"
+    concise_method: reset
+
+    # Whether to include ACE reflection in TEACHER_PROMPT when context updater is enabled
+    use_reflection_in_teacher_prompt: True
+
+    # Whether to include ACE playbook in TEACHER_PROMPT when context updater is enabled
+    use_playbook_in_teacher_prompt: True
+
+  # Clamp teacher prob to be at least this proportion of student prob; null disables
+  teacher_prob_min_ratio: null
+
+  # Clamp teacher prob to be at most this proportion of student prob; null disables
+  teacher_prob_max_ratio: null
+
+  # Whether to enable position-wise weighting in self-distillation loss
+  position_weighting_enabled: False
+
+  # Linear ramp slope beta for position-wise weighting, in [0.5, 2.0]
+  position_weighting_beta: 1.0
+
   # Whether to remove <think>...</think> tokens from the loss calculation
   remove_thinking_in_loss: False
 
@@ -133,9 +176,8 @@ self_distillation:
   # Previous attempt template - available variables: previous_attempt_raw
   previous_attempt_template: |-
 
-    The following is your previous attempt:
-
-    {previous_attempt_raw}
+    ### The following is your previous attempt:
+    <previous_attempt>{previous_attempt_raw}</previous_attempt>
 
   # Reprompting template - available variables: prompt, previous_attempt, solution, feedback, teacher_feedback
   reprompt_template: |-
@@ -153,11 +195,10 @@ self_distillation:
   # Feedback template - available variables: feedback_raw
   feedback_template: |-
 
-    The following is feedback from your earlier attempt:
+    ### The following is feedback from your earlier attempt:
+    <feedback>{feedback_raw}</feedback>
 
-    {feedback_raw}
-
-  # Whether to include teacher model feedback in reprompting
+  # Whether to include teacher feedback in reprompting
   include_teacher_feedback: False
 
   # If True, only use teacher feedback when no solution is available
@@ -167,9 +208,8 @@ self_distillation:
   # Leading newline is intentional: keeps the section absent (no blank line) when teacher_feedback=""
   teacher_feedback_template: |-
 
-    The following is feedback from the teacher model:
-
-    {teacher_feedback_raw}
+    ### The following is feedback from the teacher model:
+    <teacher_feedback>{teacher_feedback_raw}</teacher_feedback>
 
   # Teacher feedback server configuration
   teacher:

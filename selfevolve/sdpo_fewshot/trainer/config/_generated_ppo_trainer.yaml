@@ -609,6 +609,7 @@ trainer:
   - wandb
   log_val_generations: 0
   rollout_data_dir: null
+  reprompt_data_dir: null
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8

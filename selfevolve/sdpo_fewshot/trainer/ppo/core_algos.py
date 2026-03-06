@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import math
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -1081,6 +1082,29 @@ def agg_loss(
     return loss
 
 
+def _build_linear_ramp_position_weights(loss_mask: torch.Tensor, beta: float) -> torch.Tensor:
+    """Build per-token linear-ramp weights for valid response tokens.
+
+    For each sequence token position t in [1, L], define u=t/L and
+    w(u) = 1 + beta * (u - 0.5). Masked tokens receive zero weight.
+
+    Args:
+        loss_mask: `(torch.Tensor)`
+            shape (bs, response_length), with valid response tokens > 0.
+        beta: `(float)`
+            slope parameter in (0, +inf).
+
+    Returns:
+        `(torch.Tensor)`: shape (bs, response_length), non-negative weights.
+    """
+    seq_lens = loss_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+    token_pos = torch.cumsum(loss_mask, dim=-1)
+    u = token_pos / seq_lens
+    weights = 1.0 + beta * (u - 0.5)
+    weights = torch.clamp(weights, min=0.0)
+    return weights * loss_mask
+
+
 def compute_self_distillation_loss(
     student_log_probs: torch.Tensor,
     teacher_log_probs: torch.Tensor,
@@ -1107,7 +1131,7 @@ def compute_self_distillation_loss(
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
 
     if self_distillation_config.full_logit_distillation:
-        use_topk = self_distillation_config.distillation_topk is not None
+        use_topk = self_distillation_config.distillation_topk is not None or self_distillation_config.distillation_top_p is not None
         if use_topk:
             if student_topk_log_probs is None or teacher_topk_log_probs is None:
                 raise ValueError("top-k distillation requires student_topk_log_probs and teacher_topk_log_probs.")
@@ -1138,6 +1162,16 @@ def compute_self_distillation_loss(
             student_distill_log_probs = student_all_log_probs
             teacher_distill_log_probs = teacher_all_log_probs
 
+        # Clamp teacher probs: teacher_prob >= ratio * student_prob
+        teacher_prob_min_ratio = getattr(self_distillation_config, 'teacher_prob_min_ratio', None)
+        if teacher_prob_min_ratio is not None:
+            floor = student_distill_log_probs.detach() + math.log(teacher_prob_min_ratio)
+            teacher_distill_log_probs = torch.max(teacher_distill_log_probs, floor)
+        teacher_prob_max_ratio = getattr(self_distillation_config, 'teacher_prob_max_ratio', None)
+        if teacher_prob_max_ratio is not None:
+            ceil = student_distill_log_probs.detach() + math.log(teacher_prob_max_ratio)
+            teacher_distill_log_probs = torch.min(teacher_distill_log_probs, ceil)
+
         if self_distillation_config.alpha == 0.0:
             kl_loss = F.kl_div(
                 student_distill_log_probs, teacher_distill_log_probs, reduction="none", log_target=True
@@ -1165,6 +1199,15 @@ def compute_self_distillation_loss(
         per_token_loss = kl_loss.sum(-1)
     else:
         assert self_distillation_config.alpha == 1.0, "Only reverse KL is supported for non-full-logit distillation"
+        # Clamp teacher probs: teacher_prob >= ratio * student_prob
+        teacher_prob_min_ratio = getattr(self_distillation_config, 'teacher_prob_min_ratio', None)
+        if teacher_prob_min_ratio is not None:
+            floor = student_log_probs.detach() + math.log(teacher_prob_min_ratio)
+            teacher_log_probs = torch.max(teacher_log_probs, floor)
+        teacher_prob_max_ratio = getattr(self_distillation_config, 'teacher_prob_max_ratio', None)
+        if teacher_prob_max_ratio is not None:
+            ceil = student_log_probs.detach() + math.log(teacher_prob_max_ratio)
+            teacher_log_probs = torch.min(teacher_log_probs, ceil)
         log_ratio = student_log_probs - teacher_log_probs
         per_token_loss = log_ratio.detach() * student_log_probs
 
@@ -1182,13 +1225,28 @@ def compute_self_distillation_loss(
     if rollout_is_weights is not None:
         per_token_loss = per_token_loss * rollout_is_weights
 
+    position_weighting_enabled = bool(getattr(self_distillation_config, "position_weighting_enabled", False))
+    position_weighting_beta = float(getattr(self_distillation_config, "position_weighting_beta", 1.0))
+
+    weighted_loss_mask = loss_mask
+    per_token_weight = loss_mask
+    if position_weighting_enabled:
+        position_weights = _build_linear_ramp_position_weights(loss_mask=loss_mask, beta=position_weighting_beta)
+        per_token_weight = position_weights
+        weighted_loss_mask = loss_mask * position_weights
+        denom = weighted_loss_mask.sum().clamp(min=1.0)
+        base_denom = loss_mask.sum().clamp(min=1.0)
+        metrics["actor/distill_position_weight_beta"] = position_weighting_beta
+        metrics["actor/distill_position_weight_mean"] = (denom / base_denom).detach().item()
+
     loss = agg_loss(
         loss_mat=per_token_loss,
-        loss_mask=loss_mask,
+        loss_mask=weighted_loss_mask,
         loss_agg_mode=loss_agg_mode,
-        batch_num_tokens=loss_mask.sum().clamp(min=1.0),
+        batch_num_tokens=weighted_loss_mask.sum().clamp(min=1.0),
     )
     metrics["per_token_loss"] = per_token_loss.detach()
+    metrics["per_token_weight"] = per_token_weight.detach()
     return loss, metrics
 
 @deprecated("verl.trainer.ppo.core_algos.compute_policy_loss_vanilla")

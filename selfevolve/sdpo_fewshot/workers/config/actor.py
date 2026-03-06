@@ -25,7 +25,7 @@ from verl.workers.config.engine import FSDPEngineConfig, McoreEngineConfig
 from verl.workers.config.model import HFModelConfig
 from verl.workers.config.optimizer import OptimizerConfig
 
-__all__ = ["TeacherFeedbackConfig", "SelfDistillationConfig", "PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = ["TeacherFeedbackConfig", "ContextUpdaterConfig", "SelfDistillationConfig", "PolicyLossConfig", "RouterReplayConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
 
 
 @dataclass
@@ -66,6 +66,45 @@ class TeacherFeedbackConfig(BaseConfig):
 
 
 @dataclass
+class ContextUpdaterConfig(BaseConfig):
+    """Configuration for ACE context updater.
+
+    Args:
+        enabled (bool): Whether to enable ACE context updater during self-distillation.
+        concise_frequency (Optional[int]): Frequency (in context updates) to concise the playbook.
+        max_bullets (Optional[int]): Maximum number of playbook bullets to keep; None disables bullet-count trigger.
+        concise_method (str): Playbook concise strategy. Options: "reset", "prioritized".
+        use_reflection_in_teacher_prompt (bool): Whether to include ACE reflection in teacher prompt.
+        use_playbook_in_teacher_prompt (bool): Whether to include ACE playbook in teacher prompt.
+    """
+
+    enabled: bool = False
+    concise_frequency: Optional[int] = 4
+    max_bullets: Optional[int] = None
+    concise_method: str = "reset"
+    use_reflection_in_teacher_prompt: bool = True
+    use_playbook_in_teacher_prompt: bool = True
+
+    def __post_init__(self):
+        if self.concise_frequency is not None and self.concise_frequency <= 0:
+            raise ValueError(
+                "self_distillation.context_updater.concise_frequency must be a positive integer when set, got "
+                f"{self.concise_frequency}"
+            )
+        if self.max_bullets is not None and self.max_bullets <= 0:
+            raise ValueError(
+                "self_distillation.context_updater.max_bullets must be a positive integer when set, got "
+                f"{self.max_bullets}"
+            )
+        valid_concise_methods = ["reset", "prioritized"]
+        if self.concise_method not in valid_concise_methods:
+            raise ValueError(
+                "self_distillation.context_updater.concise_method must be one of "
+                f"{valid_concise_methods}, got {self.concise_method}"
+            )
+
+
+@dataclass
 class SelfDistillationConfig(BaseConfig):
     """Configuration for self-distillation loss.
 
@@ -86,6 +125,12 @@ class SelfDistillationConfig(BaseConfig):
         dont_reprompt_on_self_success (bool): Whether to not reprompt on self-success.
         remove_thinking_from_demonstration (bool): Whether to remove <think>...</think> tags from successful demonstrations before reprompting.
         is_clip (Optional[float]): Clip value for distillation IS ratio; None disables IS weighting.
+        teacher_prob_min_ratio (Optional[float]): Lower bound clamp on teacher probability relative to student probability.
+            If set, enforces p_teacher >= teacher_prob_min_ratio * p_student.
+        teacher_prob_max_ratio (Optional[float]): Upper bound clamp on teacher probability relative to student probability.
+            If set, enforces p_teacher <= teacher_prob_max_ratio * p_student.
+        position_weighting_enabled (bool): Whether to enable position-wise weighting for self-distillation loss.
+        position_weighting_beta (float): Linear ramp slope for position-wise weighting in (0, +inf).
         remove_thinking_in_loss (bool): Whether to remove <think>...</think> tokens from loss computation.
         reprompt_template (str): Template for reprompting. Uses {prompt}, {solution}, {feedback} placeholders.
         solution_template (str): Template for formatting solution section. Uses {successful_previous_attempt} placeholder.
@@ -98,6 +143,13 @@ class SelfDistillationConfig(BaseConfig):
         teacher_feedback_only_without_solution (bool): If True, only use teacher feedback when no solution is available.
         teacher_feedback_template (str): Template for the teacher feedback section. Uses {teacher_feedback_raw} placeholder.
         teacher (TeacherFeedbackConfig): Configuration for the teacher feedback server.
+        context_updater (Optional[ContextUpdaterConfig]): Nested ACE context updater configuration.
+        use_context_updater (bool): [Legacy] Whether to enable ACE context updater during self-distillation.
+        concise_frequency (Optional[int]): [Legacy] Frequency (in context updates) to concise the playbook.
+        max_bullets (Optional[int]): [Legacy] Maximum number of playbook bullets to keep.
+        concise_method (str): [Legacy] Playbook concise strategy. Options: "reset", "prioritized".
+        use_reflection_in_teacher_prompt (bool): [Legacy] Whether to include ACE reflection in teacher prompt.
+        use_playbook_in_teacher_prompt (bool): [Legacy] Whether to include ACE playbook in teacher prompt.
     """
 
     full_logit_distillation: bool = True
@@ -115,6 +167,10 @@ class SelfDistillationConfig(BaseConfig):
     dont_reprompt_on_self_success: bool = False
     remove_thinking_from_demonstration: bool = False
     is_clip: Optional[float] = None
+    teacher_prob_min_ratio: Optional[float] = None
+    teacher_prob_max_ratio: Optional[float] = None
+    position_weighting_enabled: bool = False
+    position_weighting_beta: float = 1.0
     remove_thinking_in_loss: bool = False
     reprompt_template: str = (
         "{prompt}{previous_attempt}{solution}{feedback}{teacher_feedback}\n\n"
@@ -146,6 +202,41 @@ class SelfDistillationConfig(BaseConfig):
         "{teacher_feedback_raw}"
     )
     teacher: TeacherFeedbackConfig = field(default_factory=TeacherFeedbackConfig)
+    context_updater: Optional[ContextUpdaterConfig] = None
+
+    # Legacy flat context-updater fields kept for backward compatibility.
+    use_context_updater: bool = False
+    concise_frequency: Optional[int] = 4
+    max_bullets: Optional[int] = None
+    concise_method: str = "reset"
+    use_reflection_in_teacher_prompt: bool = False
+    use_playbook_in_teacher_prompt: bool = False
+
+    def get_context_updater_enabled(self) -> bool:
+        return self.context_updater.enabled if self.context_updater is not None else self.use_context_updater
+
+    def get_context_updater_concise_frequency(self) -> Optional[int]:
+        return self.context_updater.concise_frequency if self.context_updater is not None else self.concise_frequency
+
+    def get_context_updater_max_bullets(self) -> Optional[int]:
+        return self.context_updater.max_bullets if self.context_updater is not None else self.max_bullets
+
+    def get_context_updater_concise_method(self) -> str:
+        return self.context_updater.concise_method if self.context_updater is not None else self.concise_method
+
+    def get_use_reflection_in_teacher_prompt(self) -> bool:
+        return (
+            self.context_updater.use_reflection_in_teacher_prompt
+            if self.context_updater is not None
+            else self.use_reflection_in_teacher_prompt
+        )
+
+    def get_use_playbook_in_teacher_prompt(self) -> bool:
+        return (
+            self.context_updater.use_playbook_in_teacher_prompt
+            if self.context_updater is not None
+            else self.use_playbook_in_teacher_prompt
+        )
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -184,6 +275,45 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.is_clip is not None and self.is_clip <= 0:
             raise ValueError(f"self_distillation.is_clip must be positive, got {self.is_clip}")
+        if self.teacher_prob_min_ratio is not None and not (0.0 < self.teacher_prob_min_ratio <= 1.0):
+            raise ValueError(
+                f"self_distillation.teacher_prob_min_ratio must be in (0, 1], got {self.teacher_prob_min_ratio}"
+            )
+        if self.teacher_prob_max_ratio is not None and self.teacher_prob_max_ratio <= 0.0:
+            raise ValueError(
+                f"self_distillation.teacher_prob_max_ratio must be positive, got {self.teacher_prob_max_ratio}"
+            )
+        if (
+            self.teacher_prob_min_ratio is not None
+            and self.teacher_prob_max_ratio is not None
+            and self.teacher_prob_min_ratio > self.teacher_prob_max_ratio
+        ):
+            raise ValueError(
+                "self_distillation.teacher_prob_min_ratio must be <= teacher_prob_max_ratio, got "
+                f"{self.teacher_prob_min_ratio} > {self.teacher_prob_max_ratio}"
+            )
+        if self.position_weighting_beta <= 0.0:
+            raise ValueError(
+                "self_distillation.position_weighting_beta must be > 0, got "
+                f"{self.position_weighting_beta}"
+            )
+        if self.context_updater is None:
+            if self.concise_frequency is not None and self.concise_frequency <= 0:
+                raise ValueError(
+                    "self_distillation.concise_frequency must be a positive integer when set, got "
+                    f"{self.concise_frequency}"
+                )
+            if self.max_bullets is not None and self.max_bullets <= 0:
+                raise ValueError(
+                    "self_distillation.max_bullets must be a positive integer when set, got "
+                    f"{self.max_bullets}"
+                )
+            valid_concise_methods = ["reset", "prioritized"]
+            if self.concise_method not in valid_concise_methods:
+                raise ValueError(
+                    "self_distillation.concise_method must be one of "
+                    f"{valid_concise_methods}, got {self.concise_method}"
+                )
 
 @dataclass
 class RouterReplayConfig(BaseConfig):

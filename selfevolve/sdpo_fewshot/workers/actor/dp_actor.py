@@ -48,6 +48,101 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _select_distill_tokens(
+    logits: torch.Tensor,
+    distill_topk: Optional[int] = None,
+    distill_top_p: Optional[float] = None,
+    distill_max_k: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select a subset of vocabulary tokens for distillation via top-k or top-p.
+
+    Exactly one of distill_topk or distill_top_p must be set.
+
+    Args:
+        logits: (..., vocab_size) raw logits.
+        distill_topk: If set, select the top-k tokens.
+        distill_top_p: If set, select the nucleus (top-p) tokens.
+        distill_max_k: Maximum number of tokens to keep (memory cap for top-p).
+
+    Returns:
+        topk_logits: (..., k) selected logits (padded with -inf for top-p).
+        topk_indices: (..., k) vocabulary indices of selected tokens.
+    """
+    vocab_size = logits.shape[-1]
+    if distill_topk is not None:
+        k = min(distill_topk, vocab_size)
+        return torch.topk(logits, k, dim=-1)
+    # top-p (nucleus) path — use torch.topk to get a candidate set on GPU,
+    # then compute the nucleus threshold on the smaller tensor.
+    # This avoids both a full-vocab GPU sort (OOM) and a slow CPU sort.
+    _DEFAULT_CANDIDATE_K = 1000
+    with torch.no_grad():
+        if distill_max_k is not None:
+            candidate_k = max(distill_max_k, _DEFAULT_CANDIDATE_K)
+        else:
+            candidate_k = _DEFAULT_CANDIDATE_K
+        candidate_k = min(candidate_k, vocab_size)
+        candidate_logits, candidate_indices = torch.topk(logits, candidate_k, dim=-1, sorted=True)
+        # Use true probabilities from the full-vocab distribution (not renormalized over candidates)
+        log_Z = logits.logsumexp(dim=-1, keepdim=True)
+        probs = torch.exp(candidate_logits - log_Z)
+        cumprobs = torch.cumsum(probs, dim=-1)
+        # Include the token that crosses the threshold
+        mask = (cumprobs - probs) < distill_top_p  # True for tokens within nucleus
+        num_keep = mask.sum(dim=-1).clamp(min=1)  # at least 1 token
+        if distill_max_k is not None:
+            num_keep = num_keep.clamp(max=distill_max_k)
+        max_nucleus = int(num_keep.max().item())
+        topk_indices = candidate_indices[..., :max_nucleus]
+        # Mask positions beyond each row's nucleus size.
+        # Use a large finite negative instead of -inf so that KL backward
+        # computes exp(-1e4)*(finite) ≈ 0 rather than exp(-inf)*NaN = NaN.
+        _LOG_PROB_FLOOR = -1e4
+        arange = torch.arange(max_nucleus, device=logits.device)
+        pad_mask = arange >= num_keep.unsqueeze(-1)
+    # Re-gather logits from the original tensor to preserve gradient flow
+    topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
+    topk_logits = topk_logits.masked_fill(pad_mask, _LOG_PROB_FLOOR)
+    return topk_logits, topk_indices
+
+
+def _merge_topk_indices(
+    indices_a: torch.Tensor,
+    indices_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge two sets of top-k/top-p indices into their deduplicated union per position.
+
+    Args:
+        indices_a: (..., k_a) vocabulary indices.
+        indices_b: (..., k_b) vocabulary indices.
+
+    Returns:
+        union_indices: (..., max_union_size) merged indices, padded with 0.
+        valid_mask: (..., max_union_size) boolean mask, True for valid entries.
+    """
+    combined = torch.cat([indices_a, indices_b], dim=-1)  # (..., k_a+k_b)
+    sorted_combined, _ = torch.sort(combined, dim=-1)
+    # Mark duplicates: a value equals the previous one
+    is_dup = torch.zeros_like(sorted_combined, dtype=torch.bool)
+    is_dup[..., 1:] = sorted_combined[..., 1:] == sorted_combined[..., :-1]
+    unique_mask = ~is_dup
+    num_unique = unique_mask.sum(dim=-1)  # (...)
+    max_union = num_unique.max().item()
+    # Compute compact destination indices via cumsum
+    dest_idx = unique_mask.long().cumsum(dim=-1) - 1
+    dest_idx[~unique_mask] = 0  # dummy for masked positions
+    dest_idx = dest_idx.clamp(max=max_union - 1)
+    union_indices = torch.zeros(
+        *sorted_combined.shape[:-1], max_union,
+        device=combined.device, dtype=combined.dtype,
+    )
+    union_indices.scatter_(-1, dest_idx, sorted_combined)
+    # Build validity mask
+    arange = torch.arange(max_union, device=combined.device)
+    valid_mask = arange < num_unique.unsqueeze(-1)
+    return union_indices, valid_mask
+
+
 class TrustRegionTeacher(nn.Module):
     def __init__(self, ref_module: nn.Module, student_module: nn.Module, mix_coef: float) -> None:
         super().__init__()
@@ -175,7 +270,10 @@ class DataParallelPPOActor(BasePPOActor):
         calculate_entropy: bool = False,
         return_all_logps: bool = False,
         distill_topk: Optional[int] = None,
+        distill_top_p: Optional[float] = None,
+        distill_max_k: Optional[int] = None,
         topk_indices: Optional[torch.Tensor] = None,
+        return_response_logits: bool = False,
         module: Optional[nn.Module] = None,
     ) -> dict[str, torch.Tensor]:
         """
@@ -184,18 +282,18 @@ class DataParallelPPOActor(BasePPOActor):
                 response token, i.e. all_logps of shape (bs, response_len, vocab_size). Used when
                 the student needs to match the teacher's full output distribution. When use_topk is
                 also active, top-k takes precedence and all_logps is not computed.
-            distill_topk: (SDPO) Number of top-k logits to extract from the current model's logit
-                distribution. When set (and topk_indices is None), torch.topk is used to find the
-                k highest logits and their vocabulary indices per response token. The caller
-                (typically the teacher forward pass) uses this to discover which tokens matter most,
-                then passes those indices to the student via topk_indices so both models are
-                compared on the same token subset.
+            distill_topk: (SDPO) Number of top-k logits to extract. Mutually exclusive with distill_top_p.
+            distill_top_p: (SDPO) Nucleus probability threshold. Mutually exclusive with distill_topk.
+            distill_max_k: (SDPO) Maximum number of tokens to keep when using top-p (memory cap).
             topk_indices: (SDPO) Pre-computed vocabulary indices of shape (bs, response_len, k)
                 obtained from a prior forward pass (e.g., the teacher). When provided, the model
                 gathers logits only at these positions via torch.gather instead of running
-                torch.topk, ensuring the student's log-probs are evaluated on the exact same token
-                subset as the teacher's.
-            module: If specified, use this module for the forward pass instead of self.actor_module. This is used for distillation where the teacher and student may be different modules.
+                torch.topk/top-p, ensuring the student's log-probs are evaluated on the exact same
+                token subset as the teacher's.
+            return_response_logits: If True, include the full response-portion logits in the
+                output dict under "response_logits". Used by union mode to re-gather at merged
+                indices. Prevents early deletion of the logits tensor.
+            module: If specified, use this module for the forward pass instead of self.actor_module.
 
         Returns:
             dict[str, torch.Tensor]: Always contains:
@@ -210,7 +308,7 @@ class DataParallelPPOActor(BasePPOActor):
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
 
-        use_topk = distill_topk is not None or topk_indices is not None
+        use_topk = distill_topk is not None or distill_top_p is not None or topk_indices is not None
         compute_all_logps = return_all_logps and not use_topk
         return_topk_indices = use_topk and topk_indices is None
         if (return_all_logps or use_topk) and self.use_fused_kernels:
@@ -373,8 +471,10 @@ class DataParallelPPOActor(BasePPOActor):
                     
                     if use_topk:
                         if topk_indices is None:
-                            topk = min(distill_topk, logits_rmpad.shape[-1])
-                            topk_logits_rmpad, topk_indices_rmpad = torch.topk(logits_rmpad, topk, dim=-1)
+                            topk_logits_rmpad, topk_indices_rmpad = _select_distill_tokens(
+                                logits_rmpad, distill_topk=distill_topk,
+                                distill_top_p=distill_top_p, distill_max_k=distill_max_k,
+                            )
                         else:
                             topk = topk_indices.size(-1)
                             full_topk_indices = torch.zeros(
@@ -423,7 +523,9 @@ class DataParallelPPOActor(BasePPOActor):
                     # Free the large logits tensor as early as possible.
                     # After this point only log_probs / topk / sum_pi_squared
                     # (all much smaller) are needed.
-                    del logits_rmpad
+                    # Keep logits alive when return_response_logits is requested (union mode).
+                    if not return_response_logits:
+                        del logits_rmpad
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -507,6 +609,14 @@ class DataParallelPPOActor(BasePPOActor):
                             batch=batch_size,
                             seqlen=seqlen,
                         )
+                if return_response_logits:
+                    full_response_logits = pad_input(
+                        hidden_states=logits_rmpad,
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
+                    del logits_rmpad
                 full_log_probs = pad_input(
                     hidden_states=log_probs.unsqueeze(-1),
                     indices=indices,
@@ -527,6 +637,8 @@ class DataParallelPPOActor(BasePPOActor):
                     topk_logps = full_topk_logps[:, -response_length - 1 : -1, :]
                     if return_topk_indices:
                         topk_indices = full_topk_indices[:, -response_length - 1 : -1, :]
+                if return_response_logits:
+                    response_logits = full_response_logits[:, -response_length - 1 : -1, :]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -557,12 +669,16 @@ class DataParallelPPOActor(BasePPOActor):
                         all_logps = torch.log_softmax(logits, dim=-1)
                     if use_topk:
                         if topk_indices is None:
-                            topk = min(distill_topk, logits.size(-1))
-                            topk_logits, topk_indices = torch.topk(logits, topk, dim=-1)
+                            topk_logits, topk_indices = _select_distill_tokens(
+                                logits, distill_topk=distill_topk,
+                                distill_top_p=distill_top_p, distill_max_k=distill_max_k,
+                            )
                         else:
                             topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
                         logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
                         topk_logps = topk_logits - logsumexp
+                    if return_response_logits:
+                        response_logits = logits
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
@@ -587,6 +703,8 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["topk_logps"] = topk_logps
                 if return_topk_indices:
                     outputs["topk_indices"] = topk_indices
+            if return_response_logits:
+                outputs["response_logits"] = response_logits
             return outputs
 
     def _optimizer_step(self):
@@ -770,6 +888,8 @@ class DataParallelPPOActor(BasePPOActor):
             "actor/kl_loss": 0.0,
         }
         _sd_token_values = []  # collect token-level self-distillation loss for distribution plot
+        _sd_token_positions = []  # collect position-in-response for each token
+        _sd_token_weights = []  # collect token-level self-distillation weights for distribution plot
         did_update = False
         _token_loss_dumped = False  # ensure we only dump once per update_policy call
         for _ in range(self.config.ppo_epochs):
@@ -810,18 +930,159 @@ class DataParallelPPOActor(BasePPOActor):
                     teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
                     if teacher_regularization == "trust-region" and self.use_fused_kernels:
                         raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
-                    # all return: (bsz, response_length)
-                    return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
+                    # Determine distillation subset mode
                     distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
-                    outputs = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
-                        return_all_logps=return_all_logps, distill_topk=distill_topk
+                    distill_top_p = self_distillation_cfg.distillation_top_p if self_distillation_cfg.full_logit_distillation else None
+                    distill_max_k = self_distillation_cfg.distillation_max_k
+                    uses_subset = distill_topk is not None or distill_top_p is not None
+                    return_all_logps = self_distillation_cfg.full_logit_distillation and not uses_subset
+                    token_selector = self_distillation_cfg.distillation_token_selector
+                    _LOG_PROB_FLOOR = -1e4
+                    _VALID_TOPK_THRESHOLD = -5e4
+
+                    # Common kwargs for the subset-discovery forward pass
+                    _discover_kwargs = dict(
+                        distill_topk=distill_topk, distill_top_p=distill_top_p,
+                        distill_max_k=distill_max_k,
                     )
-                    log_prob = outputs["log_probs"]
-                    entropy = outputs["entropys"] if calculate_entropy else None
-                    student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                    student_topk_logps = outputs.get("topk_logps") if distill_topk else None
-                    student_topk_indices = outputs.get("topk_indices") if distill_topk else None
+
+                    teacher_inputs = {
+                        "responses": model_inputs["responses"],
+                        "input_ids": model_inputs["teacher_input_ids"],
+                        "attention_mask": model_inputs["teacher_attention_mask"],
+                        "position_ids": model_inputs["teacher_position_ids"],
+                    }
+                    teacher_model = self.teacher_module or self.actor_module
+                    if teacher_regularization == "trust-region" and (
+                        self.teacher_module is None or self.teacher_module is self.actor_module
+                    ):
+                        raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
+
+                    if token_selector == "student":
+                        # Student discovers indices, teacher gathers at those indices
+                        outputs = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                            return_all_logps=return_all_logps, **_discover_kwargs,
+                        )
+                        log_prob = outputs["log_probs"]
+                        entropy = outputs["entropys"] if calculate_entropy else None
+                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                        student_topk_indices = outputs.get("topk_indices") if uses_subset else None
+
+                        with torch.no_grad():
+                            teacher_outputs = self._forward_micro_batch(
+                                teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                return_all_logps=return_all_logps,
+                                distill_topk=distill_topk, distill_top_p=distill_top_p,
+                                distill_max_k=distill_max_k,
+                                topk_indices=student_topk_indices,
+                                module=teacher_model,
+                            )
+                        teacher_log_prob = teacher_outputs["log_probs"]
+                        teacher_entropy = teacher_outputs.get("entropys")
+                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                        if (
+                            uses_subset
+                            and distill_top_p is not None
+                            and student_topk_logps is not None
+                            and teacher_topk_logps is not None
+                        ):
+                            valid_mask = student_topk_logps > _VALID_TOPK_THRESHOLD
+                            teacher_topk_logps = teacher_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+
+                    elif token_selector == "teacher":
+                        # Teacher discovers indices first, student gathers at those indices
+                        with torch.no_grad():
+                            teacher_outputs = self._forward_micro_batch(
+                                teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                return_all_logps=return_all_logps, **_discover_kwargs,
+                                module=teacher_model,
+                            )
+                        teacher_log_prob = teacher_outputs["log_probs"]
+                        teacher_entropy = teacher_outputs.get("entropys")
+                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                        teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
+
+                        outputs = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                            return_all_logps=return_all_logps,
+                            distill_topk=distill_topk, distill_top_p=distill_top_p,
+                            distill_max_k=distill_max_k,
+                            topk_indices=teacher_topk_indices,
+                        )
+                        log_prob = outputs["log_probs"]
+                        entropy = outputs["entropys"] if calculate_entropy else None
+                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                        student_topk_indices = teacher_topk_indices  # same indices for both
+                        if (
+                            uses_subset
+                            and distill_top_p is not None
+                            and teacher_topk_logps is not None
+                            and student_topk_logps is not None
+                        ):
+                            valid_mask = teacher_topk_logps > _VALID_TOPK_THRESHOLD
+                            student_topk_logps = student_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+
+                    elif token_selector == "union":
+                        # Both discover independently, then merge index sets
+                        need_logits = uses_subset
+                        outputs = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                            return_all_logps=return_all_logps, **_discover_kwargs,
+                            return_response_logits=need_logits,
+                        )
+                        log_prob = outputs["log_probs"]
+                        entropy = outputs["entropys"] if calculate_entropy else None
+                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                        student_topk_indices = outputs.get("topk_indices") if uses_subset else None
+                        student_response_logits = outputs.get("response_logits")
+
+                        with torch.no_grad():
+                            teacher_outputs = self._forward_micro_batch(
+                                teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                return_all_logps=return_all_logps, **_discover_kwargs,
+                                return_response_logits=need_logits,
+                                module=teacher_model,
+                            )
+                        teacher_log_prob = teacher_outputs["log_probs"]
+                        teacher_entropy = teacher_outputs.get("entropys")
+                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                        teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
+                        teacher_response_logits = teacher_outputs.get("response_logits")
+
+                        # Merge index sets and re-gather log probs at union indices
+                        if uses_subset and student_topk_indices is not None and teacher_topk_indices is not None:
+                            union_indices, valid_mask = _merge_topk_indices(
+                                student_topk_indices, teacher_topk_indices,
+                            )
+                            # Gather logits at union indices from both models
+                            student_union_logits = torch.gather(
+                                student_response_logits, dim=-1, index=union_indices,
+                            )
+                            teacher_union_logits = torch.gather(
+                                teacher_response_logits, dim=-1, index=union_indices,
+                            )
+                            # Compute logsumexp from full logits for proper normalization
+                            student_lse = torch.logsumexp(student_response_logits, dim=-1, keepdim=True)
+                            teacher_lse = torch.logsumexp(teacher_response_logits, dim=-1, keepdim=True)
+                            del student_response_logits, teacher_response_logits
+                            # Convert to log probs and mask invalid (dedup-padded) positions.
+                            # Use a large finite negative instead of -inf so that KL backward
+                            # computes exp(-1e4)*(finite) ≈ 0 rather than exp(-inf)*NaN = NaN.
+                            _LOG_PROB_FLOOR = -1e4
+                            student_topk_logps = (student_union_logits - student_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+                            teacher_topk_logps = (teacher_union_logits - teacher_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+                            student_topk_indices = union_indices
+                    else:
+                        raise ValueError(
+                            f"Unknown distillation_token_selector: {token_selector}"
+                        )
 
                     # for fully_async_policy
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -832,50 +1093,19 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             old_log_prob = model_inputs["old_log_probs"]
 
-                    # loss_mode = self.config.policy_loss.get("loss_mode", "vanilla") # already defined above
-                    # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
-
                     # Extract pre-computed rollout correction weights if present
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
                     if self_distillation_enabled:
-                        teacher_inputs = {
-                            "responses": model_inputs["responses"],
-                            "input_ids": model_inputs["teacher_input_ids"],
-                            "attention_mask": model_inputs["teacher_attention_mask"],
-                            "position_ids": model_inputs["teacher_position_ids"],
-                        }
-                        teacher_model = self.teacher_module or self.actor_module
-                        if teacher_regularization == "trust-region" and (
-                            self.teacher_module is None or self.teacher_module is self.actor_module
-                        ):
-                            raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
-                        with torch.no_grad():
-                            teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs,
-                                temperature=temperature,
-                                calculate_entropy=True,
-                                return_all_logps=return_all_logps,
-                                distill_topk=distill_topk,
-                                topk_indices=student_topk_indices,
-                                module=teacher_model,
-                            )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_entropy = teacher_outputs.get("entropys")
-                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
-                        teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
-
                         remove_thinking_in_loss = self_distillation_cfg.get("remove_thinking_in_loss", False)
                         if remove_thinking_in_loss:
                             end_think_token_id = data.meta_info.get("end_think_token_id", None)
                             if end_think_token_id is None:
                                 raise ValueError("end_think_token_id must be provided in data.meta_info when remove_thinking_in_loss is enabled.")
-                            # response_mask: (bsz, response_length)
-                            # model_inputs["responses"]: (bsz, response_length)
-                            is_end_think = model_inputs["responses"] == end_think_token_id  # (bsz, response_length), bool
-                            after_think  = is_end_think.long().cumsum(dim=-1) >= 1         # True at and after </think>
-                            distill_response_mask = (after_think & ~is_end_think).long() * response_mask # answer only
+                            is_end_think = model_inputs["responses"] == end_think_token_id
+                            after_think  = is_end_think.long().cumsum(dim=-1) >= 1
+                            distill_response_mask = (after_think & ~is_end_think).long() * response_mask
                             micro_batch_metrics["self_distillation/answer_token_fraction"] = (
                                 distill_response_mask.sum().float() / response_mask.sum().float().clamp(min=1)
                             ).item()
@@ -902,14 +1132,19 @@ class DataParallelPPOActor(BasePPOActor):
                             pg_metrics["self_distillation/teacher_entropy"] = agg_loss(
                                 loss_mat=teacher_entropy, loss_mask=distill_response_mask, loss_agg_mode=loss_agg_mode
                             ).detach().item()
-                        # Extract per_token_loss before merging into metrics — it's a full
-                        # CUDA tensor only needed for the token-level dump below.  Leaving it
-                        # in the returned metrics dict causes a Ray deserialization error on
-                        # the (GPU-less) driver.
                         _per_token_loss = pg_metrics.pop("per_token_loss", None)
+                        _per_token_weight = pg_metrics.pop("per_token_weight", None)
                         if _per_token_loss is not None:
-                            _sd_masked = _per_token_loss.detach()[distill_response_mask.bool()].cpu().numpy()
+                            _mask_bool = distill_response_mask.bool()
+                            _sd_masked = _per_token_loss.detach()[_mask_bool].cpu().numpy()
                             _sd_token_values.append(_sd_masked)
+                            # Compute position-in-response for each masked token
+                            # cumsum along seq dim gives 1-based position within each row's response
+                            _pos = _mask_bool.long().cumsum(dim=-1)[_mask_bool].cpu().numpy()
+                            _sd_token_positions.append(_pos)
+                            if _per_token_weight is not None:
+                                _sd_w = _per_token_weight.detach()[_mask_bool].cpu().numpy()
+                                _sd_token_weights.append(_sd_w)
                         micro_batch_metrics.update(pg_metrics)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -1023,4 +1258,9 @@ class DataParallelPPOActor(BasePPOActor):
             import numpy as np
             all_sd = np.concatenate(_sd_token_values)
             metrics["actor/sd_token_dist"] = all_sd.tolist()
+            all_pos = np.concatenate(_sd_token_positions)
+            metrics["actor/sd_token_by_pos"] = [all_sd.tolist(), all_pos.tolist()]
+            if _sd_token_weights:
+                all_w = np.concatenate(_sd_token_weights)
+                metrics["actor/sd_weight_by_pos"] = [all_w.tolist(), all_pos.tolist()]
         return metrics

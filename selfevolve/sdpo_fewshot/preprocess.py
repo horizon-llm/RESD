@@ -135,6 +135,23 @@ def run_proprocessing(data_source, num_proc=4, num_data=-1):
     write_rowgrouped_large(test_ds, out_test)
 
 
+def truncate_parquet(input_parquet, num_data):
+    """Read an existing parquet, truncate to num_data rows, and write a new parquet."""
+    if os.path.isdir(input_parquet):
+        input_parquet = os.path.join(input_parquet, "train.parquet")
+    print(f"Loading {input_parquet}")
+    ds = datasets.load_dataset("parquet", data_files=input_parquet, split="train")
+    print(f"Original size: {len(ds)}")
+    if num_data > 0 and num_data < len(ds):
+        ds = ds.select(range(num_data))
+    print(f"Truncated size: {len(ds)}")
+
+    base, ext = os.path.splitext(input_parquet)
+    out_path = f"{base}_{num_data}{ext}"
+    write_rowgrouped_large(ds, out_path)
+    print(f"Written to {out_path}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Produce sorted dataset that can be used for training on most relevant questions."
@@ -149,5 +166,13 @@ if __name__ == "__main__":
         default=-1,
         help="Optional limit on number of training samples to process (default: all).",
     )
+    parser.add_argument(
+        "--truncate_parquet", type=str, default=None,
+        help="Path to an existing parquet file to truncate (skips JSON preprocessing).",
+    )
     args = parser.parse_args()
-    run_proprocessing(data_source=args.data_source, num_data=args.num_data)
+
+    if args.truncate_parquet:
+        truncate_parquet(input_parquet=args.truncate_parquet, num_data=args.num_data)
+    else:
+        run_proprocessing(data_source=args.data_source, num_data=args.num_data)

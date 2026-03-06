@@ -18,41 +18,97 @@ export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
-########################### Quick Config ###########################
+########################### Data Preprocess ###########################
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/preprocess.py --data_source selfevolve/sdpo/datasets/lcb_v6 --num_data $NUM_DATA
+python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/lcb_v6_resplit --num_data $NUM_DATA
 
-finer_train_path=selfevolve/sdpo/datasets/lcb_v6/train_${NUM_DATA}.parquet
-finer_val_path=selfevolve/sdpo/datasets/lcb_v6/test.parquet
+train_path=selfevolve/sdpo/datasets/lcb_v6_resplit/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo/datasets/lcb_v6_resplit/test.parquet
+
+########################### Quick Config ###########################
+
+TASK=lcb_v6
+export TASK
 
 MAX_WORKERS=${MAX_WORKERS:-8}
 
-# Hyperparameters (from experiments/run_sdpo_all.sh)
-TRAIN_BATCH_SIZE=32
+# === optim ===
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
 LR=${LR:-1e-5}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True}
-ALPHA=${ALPHA:-0.5}
-EMA_WEIGHT=${EMA_WEIGHT:-0.05}
-TASK=lcb_v6
-export TASK
+NUM_EPOCHS=${NUM_EPOCHS:-3}
+# === model ===
+EMA_WEIGHT=${EMA_WEIGHT:-0.05} # 0.0 means no EMA, higher means more weight on updated student
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-10}
-CORRECTNESS_FEEDBACK=${CORRECTNESS_FEEDBACK:-True}
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-16384}
-ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
-DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 ENABLE_THINKING=True
+# === distillation feedback ===
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-24576}
+ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
+DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
+remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
+include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
+# === distillation objective ===
+ALPHA=${ALPHA:-0.5} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
+DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
-remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} 
+distillation_top_p=${distillation_top_p:-null}
+distillation_max_k=${distillation_max_k:-null} # maximum number of tokens to keep when using top-p (memory cap); null means no limit
+distillation_token_selector=${distillation_token_selector:-"student"} # "student": use student's topk/top-p as support; "teacher": use teacher's topk/top-p as support; "union": use the union of student and teacher support
+teacher_prob_min_ratio=${teacher_prob_min_ratio:-null} # Clamp teacher prob to be at least this proportion of student prob; null disables
+teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
+position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
+position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True
+# === context updater ===
+use_context_updater=${use_context_updater:-False}
+concise_frequency=${concise_frequency:-4} # how often to concise the context
+max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
+concise_method=${concise_method:-"reset"} # method for concising context
+use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
+use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 
 project_name='sdpo_lcb_v6'
-exp_name="qwen3_4b_fsdp_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lambda${LAMBDA}_lr${LR}_ema${EMA_WEIGHT}_envonly${ENV_ONLY_WHEN_NO_SOLUTION}_corrf${CORRECTNESS_FEEDBACK}_distk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_rmthloss${remove_thinking_in_loss}_rmthdemo${remove_thinking_from_demonstration}"
+
+# Build exp_name: only include non-default args to keep the name short.
+# Usage: _add <tag> <value> [<default>]
+#   If value != default (or no default given), appends _<tag><value> to exp_name.
+_add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
+
+exp_name="qwen3_4b_fsdp"
+_add ndata   "$NUM_DATA"
+_add trbs    "$TRAIN_BATCH_SIZE"           32
+_add rbs     "$ROLLOUT_BATCH_SIZE"         8
+_add maxpl   "$MAX_PROMPT_LENGTH"          4096
+_add maxlen  "$MAX_RESPONSE_LENGTH"        16384
+_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
+_add alpha   "$ALPHA"                      0.5
+_add lam     "$LAMBDA"                     0.0
+_add lr      "$LR"                         1e-5
+_add ema     "$EMA_WEIGHT"                 0.05
+_add envonly "$ENV_ONLY_WHEN_NO_SOLUTION"  True
+_add distk   "$DISTILLATION_TOPK"          100
+_add distp   "$distillation_top_p"         null
+_add distmk  "$distillation_max_k"         null
+_add distts  "$distillation_token_selector" student
+_add tpmin   "$teacher_prob_min_ratio"     null
+_add tpmax   "$teacher_prob_max_ratio"     null
+_add pwe     "$position_weighting_enabled" False
+_add pwb     "$position_weighting_beta"    1.0
+_add think   "$ENABLE_THINKING"            True
+_add rmthl   "$remove_thinking_in_loss"    False
+_add rmthd   "$remove_thinking_from_demonstration" False
+_add prevatt "$include_previous_attempt"   False
+_add ctxupd  "$use_context_updater"        False
+_add cfreq   "$concise_frequency"          4
+_add mbull   "$max_bullets"                null
+_add cmeth   "$concise_method"             reset
+_add ureftp  "$use_reflection_in_teacher_prompt" True
+_add uplaybp "$use_playbook_in_teacher_prompt" True
 
 ########################### Sync Results ###########################
 
@@ -93,10 +149,10 @@ fi
 ########################### Parameter Arrays ###########################
 
 DATA=(
-    data.train_files=${finer_train_path}
-    data.val_files=${finer_val_path}
+    data.train_files=${train_path}
+    data.val_files=${val_path}
     data.train_batch_size=${TRAIN_BATCH_SIZE}
-    data.max_prompt_length=4096
+    data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
@@ -119,6 +175,10 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
+)
+
+DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
@@ -127,6 +187,21 @@ ACTOR=(
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
     actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
     actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=${remove_thinking_from_demonstration}
+    actor_rollout_ref.actor.self_distillation.distillation_top_p=${distillation_top_p}
+    actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
+    actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
+    actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
+    actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
+    actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
+    actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
+    actor_rollout_ref.actor.self_distillation.position_weighting_beta=${position_weighting_beta}
+)
+
+CONTEXT_UPDATER=(
+    actor_rollout_ref.actor.self_distillation.context_updater.enabled=${use_context_updater}
+    actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
+    actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
+    actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
 )
 
 ROLLOUT=(
@@ -164,6 +239,9 @@ TRAINER=(
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=4
     trainer.test_freq=4
+    trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
+    trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"
+    trainer.reprompt_data_dir="checkpoints/${project_name}/${exp_name}/reprompts"
 )
 
 ########################### Launch ###########################
@@ -175,6 +253,8 @@ TRAINER=(
     "${MODEL[@]}" \
     "${ROLLOUT[@]}" \
     "${ACTOR[@]}" \
+    "${DISTILLATION[@]}" \
+    "${CONTEXT_UPDATER[@]}" \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "$@"
