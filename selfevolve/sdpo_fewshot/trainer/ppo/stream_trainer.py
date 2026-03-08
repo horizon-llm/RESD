@@ -2296,6 +2296,8 @@ class StreamRayPPOTrainer:
                     sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
                     sd_token_by_pos = actor_raw_metrics.pop("actor/sd_token_by_pos", None)
                     sd_weight_by_pos = actor_raw_metrics.pop("actor/sd_weight_by_pos", None)
+                    student_entropy_by_pos = actor_raw_metrics.pop("actor/student_entropy_by_pos", None)
+                    teacher_entropy_by_pos = actor_raw_metrics.pop("actor/teacher_entropy_by_pos", None)
                     actor_output_metrics = reduce_metrics(actor_raw_metrics)
                     if "wandb" in self.config.trainer.logger:
                         import wandb
@@ -2368,6 +2370,34 @@ class StreamRayPPOTrainer:
                                         table_w, "position", "mean_sd_weight",
                                         title="SD Token Weight vs Response Position",
                                     )
+                            for ent_key, ent_data, ent_col, ent_title in [
+                                ("actor/student_entropy_by_position", student_entropy_by_pos, "mean_student_entropy", "Student Entropy vs Response Position"),
+                                ("actor/teacher_entropy_by_position", teacher_entropy_by_pos, "mean_teacher_entropy", "Teacher Entropy vs Response Position"),
+                            ]:
+                                if ent_data is not None:
+                                    if ent_data and isinstance(ent_data[0], (list, tuple)) and len(ent_data) == 2 and isinstance(ent_data[0][0], (int, float)):
+                                        all_ent_vals, all_ent_pos = np.array(ent_data[0]), np.array(ent_data[1])
+                                    else:
+                                        all_ent_vals = np.concatenate([np.array(pair[0]) for pair in ent_data])
+                                        all_ent_pos = np.concatenate([np.array(pair[1]) for pair in ent_data])
+                                    max_pos_e = int(all_ent_pos.max()) if len(all_ent_pos) > 0 else 0
+                                    n_bins_e = min(max_pos_e, 64)
+                                    if n_bins_e > 0:
+                                        bin_edges_e = np.linspace(1, max_pos_e + 1, n_bins_e + 1)
+                                        bin_indices_e = np.clip(np.digitize(all_ent_pos, bin_edges_e) - 1, 0, n_bins_e - 1)
+                                        bin_means_e = np.full(n_bins_e, np.nan)
+                                        for b in range(n_bins_e):
+                                            mask = bin_indices_e == b
+                                            if mask.any():
+                                                bin_means_e[b] = all_ent_vals[mask].mean()
+                                        bin_centers_e = ((bin_edges_e[:-1] + bin_edges_e[1:]) / 2).astype(int)
+                                        table_e = wandb.Table(
+                                            data=[[int(c), float(m)] for c, m in zip(bin_centers_e, bin_means_e) if not np.isnan(m)],
+                                            columns=["position", ent_col],
+                                        )
+                                        actor_output_metrics[ent_key] = wandb.plot.line(
+                                            table_e, "position", ent_col, title=ent_title,
+                                        )
                     metrics.update(actor_output_metrics)
 
                     # early stop: fraction of prompts that improved vs previous inner iteration

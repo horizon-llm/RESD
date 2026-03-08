@@ -1,5 +1,6 @@
 import importlib
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -7,6 +8,14 @@ from typing import Any
 
 
 _IFEVAL_DIR = Path(__file__).resolve().parents[1] / "third_party" / "instruction_following_eval"
+
+
+def _remove_thinking_trace(text: str) -> str:
+    # Case 1: complete <think>...</think> block in response
+    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 2: <think> was in the prompt, response starts with thinking content
+    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+    return out_text
 
 
 def _ensure_ifeval_pkg() -> None:
@@ -67,7 +76,8 @@ def _check_following(
         try:
             instruction_cls = registry.INSTRUCTION_DICT[instruction_id]
             instruction = instruction_cls(instruction_id)
-            instruction.build_description(**kwargs_list[idx])
+            filtered_kwargs = {k: v for k, v in kwargs_list[idx].items() if v is not None}
+            instruction.build_description(**filtered_kwargs)
             args = instruction.get_instruction_args()
             if args and "prompt" in args:
                 instruction.build_description(prompt=prompt)
@@ -94,7 +104,7 @@ def compute_score(solution_str: str, ground_truth: Any, extra_info: dict | None 
       - kwargs: list[dict]
     """
     extra_info = extra_info or {}
-    response = "" if solution_str is None else str(solution_str)
+    response = "" if solution_str is None else _remove_thinking_trace(str(solution_str))
     was_truncated = bool(extra_info.get("truncated", False))
 
     try:

@@ -1,5 +1,14 @@
 import json
+import re
 from typing import Any
+
+
+def _remove_thinking_trace(text: str) -> str:
+    # Case 1: complete <think>...</think> block in response
+    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Case 2: <think> was in the prompt, response starts with thinking content
+    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
+    return out_text
 
 
 def _to_dict(ground_truth: Any) -> dict[str, Any]:
@@ -42,7 +51,7 @@ def compute_score(solution_str: str, ground_truth: Any, extra_info: dict | None 
       score = allow_hit_rate - disallow_hit_rate, range [-1, 1]
     """
     response = "" if solution_str is None else str(solution_str)
-    response_norm = _normalize_text(response)
+    response_norm = _normalize_text(_remove_thinking_trace(response))
 
     try:
         gt = _to_dict(ground_truth)

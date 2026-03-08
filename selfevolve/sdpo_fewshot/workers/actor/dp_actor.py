@@ -22,6 +22,8 @@ import os
 from types import SimpleNamespace
 from typing import Optional
 
+import numpy as np
+
 import torch
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -890,6 +892,9 @@ class DataParallelPPOActor(BasePPOActor):
         _sd_token_values = []  # collect token-level self-distillation loss for distribution plot
         _sd_token_positions = []  # collect position-in-response for each token
         _sd_token_weights = []  # collect token-level self-distillation weights for distribution plot
+        _student_entropy_values = []  # collect student entropy per token for position-wise plot
+        _teacher_entropy_values = []  # collect teacher entropy per token for position-wise plot
+        _entropy_positions = []  # collect position-in-response for entropy tokens
         did_update = False
         _token_loss_dumped = False  # ensure we only dump once per update_policy call
         for _ in range(self.config.ppo_epochs):
@@ -1145,6 +1150,15 @@ class DataParallelPPOActor(BasePPOActor):
                             if _per_token_weight is not None:
                                 _sd_w = _per_token_weight.detach()[_mask_bool].cpu().numpy()
                                 _sd_token_weights.append(_sd_w)
+                        # Collect student and teacher entropy per position
+                        if entropy is not None or teacher_entropy is not None:
+                            _ent_mask_bool = distill_response_mask.bool()
+                            _ent_pos = _ent_mask_bool.long().cumsum(dim=-1)[_ent_mask_bool].cpu().numpy()
+                            _entropy_positions.append(_ent_pos)
+                            if entropy is not None:
+                                _student_entropy_values.append(entropy.detach()[_ent_mask_bool].cpu().numpy())
+                            if teacher_entropy is not None:
+                                _teacher_entropy_values.append(teacher_entropy.detach()[_ent_mask_bool].cpu().numpy())
                         micro_batch_metrics.update(pg_metrics)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -1255,7 +1269,6 @@ class DataParallelPPOActor(BasePPOActor):
         # Store token-level self-distillation loss histogram as (counts, bin_edges) numpy arrays
         # so it can be serialized through Ray without issues.
         if _sd_token_values:
-            import numpy as np
             all_sd = np.concatenate(_sd_token_values)
             metrics["actor/sd_token_dist"] = all_sd.tolist()
             all_pos = np.concatenate(_sd_token_positions)
@@ -1263,4 +1276,12 @@ class DataParallelPPOActor(BasePPOActor):
             if _sd_token_weights:
                 all_w = np.concatenate(_sd_token_weights)
                 metrics["actor/sd_weight_by_pos"] = [all_w.tolist(), all_pos.tolist()]
+        if _entropy_positions:
+            all_ent_pos = np.concatenate(_entropy_positions)
+            if _student_entropy_values:
+                all_student_ent = np.concatenate(_student_entropy_values)
+                metrics["actor/student_entropy_by_pos"] = [all_student_ent.tolist(), all_ent_pos.tolist()]
+            if _teacher_entropy_values:
+                all_teacher_ent = np.concatenate(_teacher_entropy_values)
+                metrics["actor/teacher_entropy_by_pos"] = [all_teacher_ent.tolist(), all_ent_pos.tolist()]
         return metrics
