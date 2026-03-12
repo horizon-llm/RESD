@@ -51,6 +51,9 @@ tau_neg: 1.05
 # Whether to freeze vision model, if set true, it will be freeze vision model
 freeze_vision_tower: false
 
+# how many samples to dump for token loss analysis
+token_loss_dump_n: 0
+
 # policy loss config
 policy_loss:
 
@@ -197,9 +200,6 @@ self_distillation:
 
     ### The following is feedback from your earlier attempt:
     <feedback>{feedback_raw}</feedback>
-
-  # Whether to include teacher feedback in reprompting
-  include_teacher_feedback: False
 
   # If True, only use teacher feedback when no solution is available
   teacher_feedback_only_without_solution: False

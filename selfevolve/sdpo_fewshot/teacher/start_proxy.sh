@@ -1,0 +1,3 @@
+export PROXY_FRONTEND_PORT=15555
+export PROXY_BACKEND_PORT=15556
+python proxy.py

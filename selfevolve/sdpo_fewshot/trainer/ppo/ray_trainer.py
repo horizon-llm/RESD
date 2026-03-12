@@ -579,19 +579,20 @@ class RayPPOTrainer:
             if wandb.run is not None:
                 wandb.log({"playbook/text": wandb.Html(f"<pre>{playbook}</pre>")}, step=step)
 
-    def _log_teacher_prompt(self, messages: list, step: int):
+    def _log_teacher_prompt(self, messages: list, step: int, sample_idx: int = 0):
         """Log a sample teacher prompt to wandb under self_distillation/teacher_prompt."""
         if "wandb" in self.config.trainer.logger:
             import wandb
             if wandb.run is not None:
                 sample = self.tokenizer.apply_chat_template(
-                    messages[0],
+                    messages[sample_idx],
                     tokenize=False,
                     add_generation_prompt=True,
                 )
                 wandb.log({"self_distillation/teacher_prompt": wandb.Html(f"<pre>{sample}</pre>")}, step=step)
 
-    def _log_teacher_feedback(self, batch: DataProto, teacher_feedback_list: list, step: int):
+    def _log_teacher_feedback(self, batch: DataProto, teacher_feedback_list: list, step: int,
+                              env_feedback_list: list | None = None):
         """Log one teacher feedback sample to wandb for debugging."""
         if "wandb" not in self.config.trainer.logger:
             return
@@ -603,12 +604,11 @@ class RayPPOTrainer:
         batch_size = batch.batch.batch_size[0]
         prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
         responses = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        env_fb_list = env_feedback_list or [None] * batch_size
 
         for i in range(batch_size):
             if teacher_feedback_list[i] is not None:
-                env_fb = ""
-                if "feedback" in batch.non_tensor_batch:
-                    env_fb = batch.non_tensor_batch["feedback"][i] or ""
+                env_fb = env_fb_list[i] or ""
                 feedback_prompt = teacher_cfg.feedback_prompt_template.format(
                     prompt=prompts[i], response=responses[i], feedback=env_fb,
                 )
@@ -643,6 +643,21 @@ class RayPPOTrainer:
         """
         if reward_fn is None:
             raise ValueError("reward_fn must be provided when rm_scores is not available.")
+
+        # Populate extra_info["truncated"] for each sample so reward functions can use it.
+        # A response is truncated if it contains no EOS token in its valid (non-padding) portion.
+        eos_token_id = self.tokenizer.eos_token_id
+        for i in range(len(batch)):
+            data_item = batch[i]
+            prompt_length = data_item.batch["prompts"].shape[-1]
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+            extra_info = batch.non_tensor_batch.get("extra_info", None)
+            if extra_info is not None and i < len(extra_info):
+                if not isinstance(extra_info[i], dict):
+                    extra_info[i] = {}
+                extra_info[i]["truncated"] = not (valid_response_ids == eos_token_id).any().item()
 
         if reward_for_val:
             result = reward_fn(batch, return_dict=True)
@@ -725,18 +740,15 @@ class RayPPOTrainer:
         self,
         batch: DataProto,
         env_feedback_list: list | None = None,
-        reward_tensor: torch.Tensor | None = None,
+        acc_list: list | None = None,
     ) -> tuple:
         """Non-blocking submit of teacher feedback requests."""
         teacher_cfg = self.config.actor_rollout_ref.actor.self_distillation.teacher
-        sd_cfg = self.config.actor_rollout_ref.actor.self_distillation
         batch_size = batch.batch.batch_size[0]
 
         feedback_on_correct = teacher_cfg.get("feedback_on_correct", False)
-        if reward_tensor is not None and not feedback_on_correct:
-            success_threshold = sd_cfg.get("success_reward_threshold", 0.5)
-            seq_scores = reward_tensor.sum(dim=-1).detach().cpu().numpy()
-            request_indices = [i for i in range(batch_size) if seq_scores[i] < success_threshold]
+        if acc_list is not None and not feedback_on_correct:
+            request_indices = [i for i in range(batch_size) if not acc_list[i]]
         else:
             request_indices = list(range(batch_size))
 
@@ -780,6 +792,8 @@ class RayPPOTrainer:
         """Blocking wait for teacher feedback futures and decode responses."""
         request_indices, futures, mbs = teacher_futures
         result = [None] * batch_size
+        n_failed = 0
+        n_succeeded = 0
 
         for fut_idx, future in enumerate(futures):
             start = fut_idx * mbs
@@ -789,8 +803,26 @@ class RayPPOTrainer:
                     batch_idx = request_indices[start + j]
                     token_ids = resp_ids.tolist() if hasattr(resp_ids, "tolist") else resp_ids
                     result[batch_idx] = self._remove_thinking_trace(self.tokenizer.decode(token_ids, skip_special_tokens=True))
+                    n_succeeded += 1
             except Exception as e:
-                print(f"[teacher_feedback] future {fut_idx} failed: {e}")
+                n_batch_in_future = min(mbs, len(request_indices) - start)
+                n_failed += n_batch_in_future
+                print(f"[teacher_feedback] future {fut_idx} failed ({n_batch_in_future} samples lost): {e}")
+
+        n_requested = len(request_indices)
+        if n_requested > 0:
+            failure_rate = n_failed / n_requested
+            if "wandb" in self.config.trainer.logger:
+                import wandb
+                if wandb.run is not None:
+                    wandb.log({
+                        "teacher/request_failure_rate": failure_rate,
+                        "teacher/n_requested": n_requested,
+                        "teacher/n_failed": n_failed,
+                        "teacher/n_succeeded": n_succeeded,
+                    }, step=self.global_steps)
+            if n_failed > 0:
+                print(f"[teacher_feedback] {n_failed}/{n_requested} samples failed ({failure_rate:.1%})")
 
         return result
     
@@ -799,6 +831,7 @@ class RayPPOTrainer:
         batch: DataProto,
         reward_tensor: torch.Tensor,
         reward_extra_infos_dict: Optional[dict[str, list]] = None,
+        timing_raw: Optional[dict] = None,
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
         self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
@@ -819,13 +852,15 @@ class RayPPOTrainer:
             batch_size=batch_size,
         )
 
-        # Extract teacher feedback if available and include_teacher_feedback is enabled
+        # Extract teacher feedback if available and teacher is enabled
         teacher_feedback_list: list[Any] = [None] * batch_size
-        if self_distillation_cfg.get("include_teacher_feedback", False) and reward_extra_infos_dict is not None:
+        if self_distillation_cfg.teacher.enabled and reward_extra_infos_dict is not None:
             raw_teacher_feedback = reward_extra_infos_dict.get("teacher_feedback", [])
             for i in range(min(len(raw_teacher_feedback), batch_size)):
                 if raw_teacher_feedback[i] and isinstance(raw_teacher_feedback[i], str) and raw_teacher_feedback[i].strip():
                     teacher_feedback_list[i] = raw_teacher_feedback[i]
+            num_valid = sum(1 for fb in teacher_feedback_list if fb is not None)
+            print(f"[Teacher] Extracted {num_valid}/{batch_size} teacher feedbacks (step={self.global_steps})")
 
         # --- ACE Context Update (only when use_context_updater is enabled) ---
         previous_trials = None
@@ -836,18 +871,20 @@ class RayPPOTrainer:
             self.checkpoint_manager.update_weights()
 
             print(f"[ACE] Running context update (step={self.global_steps})...")
-            acc_list = None
-            if reward_extra_infos_dict is not None:
-                acc_list = reward_extra_infos_dict.get("acc", None)
-            context_update_results = self.context_updater.update(
-                batch, self.async_rollout_manager, self.tokenizer, feedback_list,
-                teacher_feedback_list=teacher_feedback_list,
-                acc_list=acc_list,
-            )
+            _timing = timing_raw if timing_raw is not None else {}
+            with marked_timer("context_update", _timing, color="olive"):
+                acc_list = None
+                if reward_extra_infos_dict is not None:
+                    acc_list = reward_extra_infos_dict.get("acc", None)
+                context_update_results = self.context_updater.update(
+                    batch, self.async_rollout_manager, self.tokenizer, feedback_list,
+                    teacher_feedback_list=teacher_feedback_list,
+                    acc_list=acc_list,
+                )
             previous_trials = context_update_results.get("response_texts", None)
             reflection_list = context_update_results.get("reflection_texts", None)
             playbook_stats = context_update_results.get("final_stats", None)
-            print(f"[ACE] Context update complete (step={self.global_steps}).")
+            print(f"[ACE] Context update complete (step={self.global_steps}, took {_timing.get('context_update', 0):.1f}s).")
             self._log_playbook(self.context_updater.playbook, self.global_steps)
 
             self.checkpoint_manager.sleep_replicas()
@@ -928,7 +965,6 @@ class RayPPOTrainer:
                     reprompt_text = TEACHER_PROMPT.format(
                         prompt=prompt_texts[i],
                         previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
-                        solution=solution_section,
                         feedback=feedback_section,
                         teacher_feedback=teacher_feedback_section,
                         reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
@@ -987,7 +1023,6 @@ class RayPPOTrainer:
 
 
         messages = [_build_teacher_message(i) for i in range(batch_size)]
-        self._log_teacher_prompt(messages, self.global_steps)
         enable_thinking = self.config.data.apply_chat_template_kwargs.get("enable_thinking", True) if self.config.data.apply_chat_template_kwargs else True
         teacher_prompt = self.tokenizer.apply_chat_template(
             messages,
@@ -1050,6 +1085,11 @@ class RayPPOTrainer:
             dtype=torch.float32,
             device=device
         )
+
+        # Log a reprompted sample (with feedback/reflection) to wandb; fall back to index 0
+        reprompted_indices = self_distillation_mask.nonzero(as_tuple=False)
+        log_idx = reprompted_indices[0].item() if len(reprompted_indices) > 0 else 0
+        self._log_teacher_prompt(messages, self.global_steps, sample_idx=log_idx)
 
         reprompt_lens = teacher_prompt["attention_mask"].sum(dim=1).float()
 
@@ -2130,10 +2170,11 @@ class RayPPOTrainer:
                     # Overlaps with old_log_prob and ref_log_prob GPU computation below.
                     if self.teacher_client is not None:
                         env_fb = list(reward_extra_infos_dict.get("feedback", [None] * batch.batch.batch_size[0]))
+                        acc_list = reward_extra_infos_dict.get("acc", None)
                         teacher_futures = self._submit_teacher_feedback(
                             batch,
                             env_feedback_list=env_fb,
-                            reward_tensor=reward_tensor,
+                            acc_list=acc_list,
                         )
 
                     # Operating Mode Selection:
@@ -2200,10 +2241,11 @@ class RayPPOTrainer:
                     if self.teacher_client is not None:
                         if teacher_futures is None:
                             env_fb = list(reward_extra_infos_dict.get("feedback", [None] * batch.batch.batch_size[0]))
+                            acc_list = reward_extra_infos_dict.get("acc", None)
                             teacher_futures = self._submit_teacher_feedback(
                                 batch,
                                 env_feedback_list=env_fb,
-                                reward_tensor=None,
+                                acc_list=acc_list,
                             )
                         with marked_timer("teacher_feedback_wait", timing_raw):
                             reward_extra_infos_dict["teacher_feedback"] = self._resolve_teacher_feedback(
@@ -2214,6 +2256,7 @@ class RayPPOTrainer:
                                 batch,
                                 reward_extra_infos_dict["teacher_feedback"],
                                 self.global_steps,
+                                env_feedback_list=env_fb,
                             )
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -2223,7 +2266,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
-                        self_distillation_data = self._maybe_build_self_distillation_batch(batch, reward_tensor, reward_extra_infos_dict)
+                        self_distillation_data = self._maybe_build_self_distillation_batch(batch, reward_tensor, reward_extra_infos_dict, timing_raw=timing_raw)
                         if self_distillation_data is not None:
                             self_distillation_batch, self_distillation_metrics = self_distillation_data
                             batch = batch.union(self_distillation_batch)
@@ -2314,6 +2357,7 @@ class RayPPOTrainer:
                         sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
                         sd_token_by_pos = actor_raw_metrics.pop("actor/sd_token_by_pos", None)
                         sd_weight_by_pos = actor_raw_metrics.pop("actor/sd_weight_by_pos", None)
+                        sd_effective_loss_by_pos = actor_raw_metrics.pop("actor/sd_effective_loss_by_pos", None)
                         student_entropy_by_pos = actor_raw_metrics.pop("actor/student_entropy_by_pos", None)
                         teacher_entropy_by_pos = actor_raw_metrics.pop("actor/teacher_entropy_by_pos", None)
                         actor_output_metrics = reduce_metrics(actor_raw_metrics)
@@ -2387,6 +2431,34 @@ class RayPPOTrainer:
                                         actor_output_metrics["actor/sd_weight_by_position"] = wandb.plot.line(
                                             table_w, "position", "mean_sd_weight",
                                             title="SD Token Weight vs Response Position",
+                                        )
+                                if sd_effective_loss_by_pos is not None:
+                                    if sd_effective_loss_by_pos and isinstance(sd_effective_loss_by_pos[0], (list, tuple)) and len(sd_effective_loss_by_pos) == 2 and isinstance(sd_effective_loss_by_pos[0][0], (int, float)):
+                                        all_eff, all_pos_eff = np.array(sd_effective_loss_by_pos[0]), np.array(sd_effective_loss_by_pos[1])
+                                    else:
+                                        all_eff = np.concatenate([np.array(pair[0]) for pair in sd_effective_loss_by_pos])
+                                        all_pos_eff = np.concatenate([np.array(pair[1]) for pair in sd_effective_loss_by_pos])
+                                    max_pos_eff = int(all_pos_eff.max()) if len(all_pos_eff) > 0 else 0
+                                    n_bins_eff = min(max_pos_eff, 64)
+                                    if n_bins_eff > 0:
+                                        bin_edges_eff = np.linspace(1, max_pos_eff + 1, n_bins_eff + 1)
+                                        bin_indices_eff = np.digitize(all_pos_eff, bin_edges_eff) - 1
+                                        bin_indices_eff = np.clip(bin_indices_eff, 0, n_bins_eff - 1)
+                                        bin_means_eff = np.full(n_bins_eff, np.nan)
+                                        bin_stds_eff = np.full(n_bins_eff, np.nan)
+                                        for b in range(n_bins_eff):
+                                            mask = bin_indices_eff == b
+                                            if mask.any():
+                                                bin_means_eff[b] = all_eff[mask].mean()
+                                                bin_stds_eff[b] = all_eff[mask].std()
+                                        bin_centers_eff = ((bin_edges_eff[:-1] + bin_edges_eff[1:]) / 2).astype(int)
+                                        table_eff = wandb.Table(
+                                            data=[[int(c), float(m), float(s)] for c, m, s in zip(bin_centers_eff, bin_means_eff, bin_stds_eff) if not np.isnan(m)],
+                                            columns=["position", "mean_effective_loss", "std_effective_loss"],
+                                        )
+                                        actor_output_metrics["actor/sd_effective_loss_by_position"] = wandb.plot.line(
+                                            table_eff, "position", "mean_effective_loss",
+                                            title="SD Effective Loss (loss*weight) vs Response Position",
                                         )
                                 for ent_key, ent_data, ent_col, ent_title in [
                                     ("actor/student_entropy_by_position", student_entropy_by_pos, "mean_student_entropy", "Student Entropy vs Response Position"),

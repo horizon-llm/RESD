@@ -149,6 +149,9 @@ trainer:
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
+  # Directory for logging reprompt data; no dump if null
+  reprompt_data_dir: null
+
   # Number of nodes used in the training
   nnodes: 1
 

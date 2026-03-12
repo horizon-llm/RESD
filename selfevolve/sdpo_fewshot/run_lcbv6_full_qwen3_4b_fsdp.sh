@@ -23,6 +23,8 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
+hf download YWZBrandon/lcb_v6_resplit --local-dir selfevolve/sdpo/datasets/lcb_v6_resplit --repo-type dataset
+
 python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/lcb_v6_resplit --num_data $NUM_DATA
 
 train_path=selfevolve/sdpo/datasets/lcb_v6_resplit/train_${NUM_DATA}.parquet
@@ -71,6 +73,9 @@ max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include
 concise_method=${concise_method:-"reset"} # method for concising context
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
+# === teacher ===
+teacher_enabled=${teacher_enabled:-False}
+feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 
 project_name='sdpo_lcb_v6'
 
@@ -109,6 +114,8 @@ _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
+_add teachfb "$teacher_enabled"   False
+_add foc     "$feedback_on_correct"        False
 
 ########################### Sync Results ###########################
 
@@ -176,6 +183,7 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
+    actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
 DISTILLATION=(
@@ -202,6 +210,12 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
+)
+
+TEACHER=(
+    actor_rollout_ref.actor.self_distillation.teacher.enabled=${teacher_enabled}
+    actor_rollout_ref.actor.self_distillation.teacher.server_ip="127.0.0.1"
+    actor_rollout_ref.actor.self_distillation.teacher.feedback_on_correct=${feedback_on_correct}
 )
 
 ROLLOUT=(
@@ -239,6 +253,7 @@ TRAINER=(
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=4
     trainer.test_freq=4
+    trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"
     trainer.reprompt_data_dir="checkpoints/${project_name}/${exp_name}/reprompts"
@@ -256,5 +271,6 @@ TRAINER=(
     "${DISTILLATION[@]}" \
     "${CONTEXT_UPDATER[@]}" \
     "${REF[@]}" \
+    "${TEACHER[@]}" \
     "${TRAINER[@]}" \
     "$@"

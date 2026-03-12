@@ -1177,41 +1177,53 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                         micro_batch_metrics.update(pg_metrics)
 
-                    # Dump token-level distillation loss (rank 0, once per update_policy call)
+                    # Dump token-level distillation loss (all ranks, once per update_policy call)
                     n_dump = self.config.get("token_loss_dump_n", 0)
                     if (
                         self_distillation_enabled
                         and n_dump > 0
                         and not _token_loss_dumped
-                        and torch.distributed.get_rank() == 0
                     ):
                         _token_loss_dumped = True
-                        n = min(n_dump, log_prob.shape[0])
-                        default_local_dir = data.meta_info.get("default_local_dir", ".")
-                        dump_dir = os.path.join(default_local_dir, "token_loss_dumps")
-                        os.makedirs(dump_dir, exist_ok=True)
-                        global_steps = data.meta_info.get("global_steps", self._update_step)
-                        dump_data = {
-                            "response_mask": response_mask[:n].detach().cpu(),
-                            "log_prob": log_prob[:n].detach().cpu(),
-                            "teacher_log_prob": teacher_log_prob[:n].detach().cpu(),
-                            "token_distill_loss": _per_token_loss[:n].cpu(),
-                            "input_ids": model_inputs["input_ids"][:n].detach().cpu(),
-                            "response_ids": model_inputs["responses"][:n].detach().cpu(),
-                        }
-                        if "teacher_input_ids" in model_inputs:
-                            dump_data["teacher_input_ids"] = model_inputs["teacher_input_ids"][:n].detach().cpu()
+                        rank = torch.distributed.get_rank()
+                        world_size = torch.distributed.get_world_size()
+                        # Distribute the global budget evenly; remainder goes to lower ranks
+                        per_rank = n_dump // world_size
+                        remainder = n_dump % world_size
+                        n_local = per_rank + (1 if rank < remainder else 0)
+                        # Filter to only samples with self_distillation_mask on
                         if self_distillation_mask is not None:
-                            dump_data["self_distillation_mask"] = self_distillation_mask[:n].detach().cpu()
-                        if distill_response_mask is not response_mask:
-                            dump_data["distill_response_mask"] = distill_response_mask[:n].detach().cpu()
-                        if student_topk_indices is not None:
-                            dump_data["topk_indices"] = student_topk_indices[:n].detach().cpu()
-                        if student_topk_logps is not None:
-                            dump_data["student_topk_logps"] = student_topk_logps[:n].detach().cpu()
-                        if teacher_topk_logps is not None:
-                            dump_data["teacher_topk_logps"] = teacher_topk_logps[:n].detach().cpu()
-                        torch.save(dump_data, os.path.join(dump_dir, f"step_{global_steps}.pt"))
+                            sd_indices = self_distillation_mask.bool().nonzero(as_tuple=False).squeeze(-1)
+                        else:
+                            sd_indices = torch.arange(log_prob.shape[0], device=log_prob.device)
+                        n = min(n_local, sd_indices.shape[0])
+                        if n > 0:
+                            dump_idx = sd_indices[:n]
+                            default_local_dir = data.meta_info.get("default_local_dir", ".")
+                            dump_dir = os.path.join(default_local_dir, "token_loss_dumps")
+                            os.makedirs(dump_dir, exist_ok=True)
+                            global_steps = data.meta_info.get("global_steps", self._update_step)
+                            dump_data = {
+                                "response_mask": response_mask[dump_idx].detach().cpu(),
+                                "log_prob": log_prob[dump_idx].detach().cpu(),
+                                "teacher_log_prob": teacher_log_prob[dump_idx].detach().cpu(),
+                                "token_distill_loss": _per_token_loss[dump_idx].cpu(),
+                                "input_ids": model_inputs["input_ids"][dump_idx].detach().cpu(),
+                                "response_ids": model_inputs["responses"][dump_idx].detach().cpu(),
+                            }
+                            if "teacher_input_ids" in model_inputs:
+                                dump_data["teacher_input_ids"] = model_inputs["teacher_input_ids"][dump_idx].detach().cpu()
+                            if self_distillation_mask is not None:
+                                dump_data["self_distillation_mask"] = self_distillation_mask[dump_idx].detach().cpu()
+                            if distill_response_mask is not response_mask:
+                                dump_data["distill_response_mask"] = distill_response_mask[dump_idx].detach().cpu()
+                            if student_topk_indices is not None:
+                                dump_data["topk_indices"] = student_topk_indices[dump_idx].detach().cpu()
+                            if student_topk_logps is not None:
+                                dump_data["student_topk_logps"] = student_topk_logps[dump_idx].detach().cpu()
+                            if teacher_topk_logps is not None:
+                                dump_data["teacher_topk_logps"] = teacher_topk_logps[dump_idx].detach().cpu()
+                            torch.save(dump_data, os.path.join(dump_dir, f"step_{global_steps}_rank{rank}.pt"))
 
                     # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
@@ -1276,6 +1288,8 @@ class DataParallelPPOActor(BasePPOActor):
             if _sd_token_weights:
                 all_w = np.concatenate(_sd_token_weights)
                 metrics["actor/sd_weight_by_pos"] = [all_w.tolist(), all_pos.tolist()]
+                effective_loss = (all_sd * all_w).tolist()
+                metrics["actor/sd_effective_loss_by_pos"] = [effective_loss, all_pos.tolist()]
         if _entropy_positions:
             all_ent_pos = np.concatenate(_entropy_positions)
             if _student_entropy_values:

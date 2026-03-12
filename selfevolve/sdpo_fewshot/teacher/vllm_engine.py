@@ -143,9 +143,11 @@ class VLLMEngine:
             ckpt_path,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
-            enable_chunked_prefill=False,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
             max_logprobs=n_logprobs,
-            gpu_memory_utilization=0.7,
+            gpu_memory_utilization=0.85,
+            max_model_len=65536,
         )
 
     def get_topk_logprobs(self, prompt_token_ids, temperature=0.8, max_new_tokens=1, only_response=False):

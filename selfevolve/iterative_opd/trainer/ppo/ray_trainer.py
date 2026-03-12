@@ -461,6 +461,48 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
+    def _log_reprompt_data(
+        self, batch: DataProto, timing_raw: dict, reprompt_data_dir: str
+    ):
+        """Log reprompt texts to disk as JSONL for all samples."""
+        if "teacher_input_ids" not in batch.batch:
+            return
+
+        with marked_timer("dump_reprompt_data", timing_raw, color="green"):
+            teacher_input_ids = batch.batch["teacher_input_ids"]
+            responses = batch.batch["responses"]
+            reprompt_len = teacher_input_ids.shape[1] - responses.shape[1]
+            reprompt_ids = teacher_input_ids[:, :reprompt_len]
+
+            reprompt_texts = self.tokenizer.batch_decode(reprompt_ids, skip_special_tokens=True)
+            prompt_texts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            response_texts = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+            sd_mask = batch.batch["self_distillation_mask"].cpu().tolist()
+
+            os.makedirs(reprompt_data_dir, exist_ok=True)
+            filename = os.path.join(reprompt_data_dir, f"{self.global_steps}.jsonl")
+
+            lines = []
+            n = len(reprompt_texts)
+            for i in range(n):
+                entry = {
+                    "reprompt": reprompt_texts[i],
+                    "prompt": prompt_texts[i],
+                    "response": response_texts[i],
+                    "score": scores[i],
+                    "self_distillation_mask": sd_mask[i],
+                    "step": self.global_steps,
+                }
+                if "uid" in batch.non_tensor_batch:
+                    entry["uid"] = str(batch.non_tensor_batch["uid"][i])
+                lines.append(json.dumps(entry, ensure_ascii=False))
+
+            with open(filename, "w") as f:
+                f.write("\n".join(lines) + "\n")
+
+            print(f"Dumped reprompt data to {filename}")
+
     def _log_playbook(self, playbook: str, step: int):
         """Log the current playbook text to the configured logger (wandb only)."""
         if "wandb" in self.config.trainer.logger:
@@ -1999,6 +2041,11 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+
+                    # Log reprompt texts if enabled
+                    reprompt_data_dir = self.config.trainer.get("reprompt_data_dir", None)
+                    if reprompt_data_dir:
+                        self._log_reprompt_data(batch, timing_raw, reprompt_data_dir)
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (

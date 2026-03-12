@@ -57,7 +57,7 @@ ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 ENABLE_THINKING=True
 remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
-include_teacher_feedback=${include_teacher_feedback:-True}
+teacher_enabled=${teacher_enabled:-True}
 max_updates_per_batch=${max_updates_per_batch:-4}
 min_updates_per_batch=${min_updates_per_batch:-1}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.01}
@@ -65,7 +65,7 @@ feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher f
 include_previous_attempt=${include_previous_attempt:-True} # whether to include the previous attempt into the reprompt
 
 project_name='sdpo_stream_finer'
-exp_name="qwen3_4b_stream_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_disttopk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_tfb${include_teacher_feedback}_maxup${max_updates_per_batch}_minup${min_updates_per_batch}_earlystop${early_stop_improvement_threshold}_foc${feedback_on_correct}_incprev${include_previous_attempt}"
+exp_name="qwen3_4b_stream_ndata${NUM_DATA}_trbs${TRAIN_BATCH_SIZE}_rbs${ROLLOUT_BATCH_SIZE}_maxlen${MAX_RESPONSE_LENGTH}_maxreprompt${MAX_REPROMPT_LENGTH}_alpha${ALPHA}_lr${LR}_ema${EMA_WEIGHT}_disttopk${DISTILLATION_TOPK}_think${ENABLE_THINKING}_tfb${teacher_enabled}_maxup${max_updates_per_batch}_minup${min_updates_per_batch}_earlystop${early_stop_improvement_threshold}_foc${feedback_on_correct}_incprev${include_previous_attempt}"
 
 ########################### Sync Results ###########################
 
@@ -139,7 +139,6 @@ ACTOR=(
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
     actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
-    actor_rollout_ref.actor.self_distillation.include_teacher_feedback=${include_teacher_feedback}
     actor_rollout_ref.actor.self_distillation.teacher_feedback_only_without_solution=False
     actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
 )

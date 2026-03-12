@@ -140,7 +140,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.n=$ROLLOUT_BATCH_SIZE
-    actor_rollout_ref.rollout.val_kwargs.n=1
+    actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
@@ -172,6 +172,9 @@ TRAINER=(
     trainer.save_freq=4
     trainer.test_freq=4
     trainer.val_before_train=True
+    trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
+    trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"
+    trainer.reprompt_data_dir="checkpoints/${project_name}/${exp_name}/reprompts"
 )
 
 ########################### Launch ###########################

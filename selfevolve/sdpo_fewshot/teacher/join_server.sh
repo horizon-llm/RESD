@@ -29,6 +29,6 @@ wait_server_ready proxy $PROXY_IP $PROXY_BACKEND_PORT
 
 echo "teacher proxy is ready"
 
-nohup python worker.py --backend $BACKEND --proxy-addr $PROXY_IP:$PROXY_BACKEND_PORT --tp-size 8 --n-logprobs 256 --ckpt-path $CKPT_PATH &> worker.log &
+nohup python worker.py --backend $BACKEND --proxy-addr $PROXY_IP:$PROXY_BACKEND_PORT --tp-size 8 --n-logprobs 2 --ckpt-path $CKPT_PATH &> worker.log &
 
 echo "teacher server is ready"

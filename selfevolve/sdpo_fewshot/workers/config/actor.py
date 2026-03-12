@@ -139,7 +139,6 @@ class SelfDistillationConfig(BaseConfig):
         previous_attempt_template (str): Template for the previous attempt section. Uses {previous_attempt_raw} placeholder.
         include_environment_feedback (bool): Whether to include environment feedback in reprompting for wrong attempts.
         environment_feedback_only_without_solution (bool): If True, only use feedback when no solution is available (ignore feedback when solution exists).
-        include_teacher_feedback (bool): Whether to include teacher model feedback in reprompting.
         teacher_feedback_only_without_solution (bool): If True, only use teacher feedback when no solution is available.
         teacher_feedback_template (str): Template for the teacher feedback section. Uses {teacher_feedback_raw} placeholder.
         teacher (TeacherFeedbackConfig): Configuration for the teacher feedback server.
@@ -194,7 +193,6 @@ class SelfDistillationConfig(BaseConfig):
     )
     include_environment_feedback: bool = False
     environment_feedback_only_without_solution: bool = False
-    include_teacher_feedback: bool = False
     teacher_feedback_only_without_solution: bool = False
     teacher_feedback_template: str = (
         "\n"
