@@ -23,7 +23,7 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-hf download YWZBrandon/lcb_v6_resplit --local-dir selfevolve/sdpo/datasets/lcb_v6_resplit --repo-type dataset
+hf download YWZBrandon/lcb_v6_resplit_v2 --local-dir selfevolve/sdpo/datasets/lcb_v6_resplit --repo-type dataset
 
 python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/lcb_v6_resplit --num_data $NUM_DATA
 
@@ -47,10 +47,10 @@ NUM_EPOCHS=${NUM_EPOCHS:-3}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.05} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-24576}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-25600}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
@@ -66,18 +66,24 @@ teacher_prob_min_ratio=${teacher_prob_min_ratio:-null} # Clamp teacher prob to b
 teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
 position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
 position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True
+entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] fraction of tokens to keep per sequence by (teacher_H - student_H); null disables
+entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
+entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
 # === context updater ===
 use_context_updater=${use_context_updater:-False}
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
-concise_method=${concise_method:-"reset"} # method for concising context
+concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
+reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
+curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 
-project_name='sdpo_lcb_v6'
+project_name='sdpo_lcb_v6_resplit_v2'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -89,8 +95,8 @@ _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
-_add maxlen  "$MAX_RESPONSE_LENGTH"        16384
-_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
+_add maxlen  "$MAX_RESPONSE_LENGTH"        20480
+_add maxrp   "$MAX_REPROMPT_LENGTH"        25600
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -104,6 +110,9 @@ _add tpmin   "$teacher_prob_min_ratio"     null
 _add tpmax   "$teacher_prob_max_ratio"     null
 _add pwe     "$position_weighting_enabled" False
 _add pwb     "$position_weighting_beta"    1.0
+_add edfr    "$entropy_diff_filter_ratio"  null
+_add efr     "$entropy_filter_ratio"      null
+_add efc     "$entropy_filter_criterion"  diff
 _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
@@ -114,6 +123,9 @@ _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
+_add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
+_add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
+_add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 
@@ -182,7 +194,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -203,6 +215,9 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
     actor_rollout_ref.actor.self_distillation.position_weighting_beta=${position_weighting_beta}
+    actor_rollout_ref.actor.self_distillation.entropy_diff_filter_ratio=${entropy_diff_filter_ratio}
+    actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
+    actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
 )
 
 CONTEXT_UPDATER=(
@@ -210,6 +225,11 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
 )
 
 TEACHER=(
@@ -226,7 +246,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=32768
+    actor_rollout_ref.rollout.max_model_len=69632
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
@@ -251,8 +271,8 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=4
-    trainer.test_freq=4
+    trainer.save_freq=8
+    trainer.test_freq=8
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"

@@ -76,6 +76,21 @@ class ContextUpdaterConfig(BaseConfig):
         concise_method (str): Playbook concise strategy. Options: "reset", "prioritized".
         use_reflection_in_teacher_prompt (bool): Whether to include ACE reflection in teacher prompt.
         use_playbook_in_teacher_prompt (bool): Whether to include ACE playbook in teacher prompt.
+        reflector_prompt_template (Optional[str]): Template for the reflector prompt.
+            Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}.
+            If null, uses the built-in default from prompts/ace_reflector.py.
+        curator_prompt_template (Optional[str]): Template for the curator prompt.
+            Available variables: {playbook_stats}, {recent_reflection}, {current_playbook}, {prompt}.
+            If null, uses the built-in default from prompts/ace_curator.py.
+        reflector_prompt_file (Optional[str]): Path to a text file containing the reflector prompt template.
+            Takes precedence over reflector_prompt_template. If null, falls back to reflector_prompt_template.
+        curator_prompt_file (Optional[str]): Path to a text file containing the curator prompt template.
+            Takes precedence over curator_prompt_template. If null, falls back to curator_prompt_template.
+        cu_teacher_prompt_template (Optional[str]): Template for the context-updater teacher (generator) prompt
+            used during reprompting. Available variables: {playbook}, {prompt}, {previous_trial}, {feedback},
+            {reflection}, {teacher_feedback}. If null, uses the built-in default from prompts/ace_generator.py.
+        cu_teacher_prompt_file (Optional[str]): Path to a text file containing the context-updater teacher prompt
+            template. Takes precedence over cu_teacher_prompt_template.
     """
 
     enabled: bool = False
@@ -84,6 +99,12 @@ class ContextUpdaterConfig(BaseConfig):
     concise_method: str = "reset"
     use_reflection_in_teacher_prompt: bool = True
     use_playbook_in_teacher_prompt: bool = True
+    reflector_prompt_template: Optional[str] = None
+    curator_prompt_template: Optional[str] = None
+    reflector_prompt_file: Optional[str] = None
+    curator_prompt_file: Optional[str] = None
+    cu_teacher_prompt_template: Optional[str] = None
+    cu_teacher_prompt_file: Optional[str] = None
 
     def __post_init__(self):
         if self.concise_frequency is not None and self.concise_frequency <= 0:
@@ -129,6 +150,16 @@ class SelfDistillationConfig(BaseConfig):
             If set, enforces p_teacher >= teacher_prob_min_ratio * p_student.
         teacher_prob_max_ratio (Optional[float]): Upper bound clamp on teacher probability relative to student probability.
             If set, enforces p_teacher <= teacher_prob_max_ratio * p_student.
+        entropy_diff_filter_ratio (Optional[float]): [Deprecated, use entropy_filter_ratio + entropy_filter_criterion]
+            Fraction of tokens to keep per sequence based on (teacher_entropy - student_entropy). None disables.
+        entropy_filter_ratio (Optional[float]): Fraction of tokens to keep per sequence based on entropy_filter_criterion. None disables.
+        entropy_filter_criterion (str): Which entropy criterion to use for filtering. Options:
+            - "diff": keep tokens with high (teacher_entropy - student_entropy). Teacher uncertain, student confident.
+            - "teacher_low": keep tokens with LOW teacher entropy. Teacher is confident (high-quality signal).
+            - "teacher_high": keep tokens with HIGH teacher entropy. Teacher is uncertain (diverse signal).
+            - "student_high": keep tokens with HIGH student entropy. Student is confused (needs learning).
+            - "student_low": keep tokens with LOW student entropy. Student is confident.
+            - "ratio": keep tokens with high (teacher_entropy / student_entropy). Relative uncertainty ratio.
         position_weighting_enabled (bool): Whether to enable position-wise weighting for self-distillation loss.
         position_weighting_beta (float): Linear ramp slope for position-wise weighting in (0, +inf).
         remove_thinking_in_loss (bool): Whether to remove <think>...</think> tokens from loss computation.
@@ -168,6 +199,9 @@ class SelfDistillationConfig(BaseConfig):
     is_clip: Optional[float] = None
     teacher_prob_min_ratio: Optional[float] = None
     teacher_prob_max_ratio: Optional[float] = None
+    entropy_diff_filter_ratio: Optional[float] = None  # deprecated, use entropy_filter_ratio + entropy_filter_criterion
+    entropy_filter_ratio: Optional[float] = None
+    entropy_filter_criterion: str = "diff"
     position_weighting_enabled: bool = False
     position_weighting_beta: float = 1.0
     remove_thinking_in_loss: bool = False

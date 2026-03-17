@@ -69,7 +69,7 @@ from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from ...context_updater import ACEContextUpdater
-from ...context_updater.prompts import TEACHER_PROMPT
+from ...context_updater.prompts import TEACHER_PROMPT as _DEFAULT_TEACHER_PROMPT
 from ...teacher import TeacherClient
 
 
@@ -339,6 +339,13 @@ class RayPPOTrainer:
             default=False,
         )
         self.context_updater = ACEContextUpdater(config) if self.use_context_updater else None
+        if self.use_context_updater:
+            ctx_cfg = config.actor_rollout_ref.actor.get("self_distillation", {}).get("context_updater", None)
+            self.cu_teacher_prompt_template = ACEContextUpdater._resolve_prompt_template(
+                ctx_cfg, "cu_teacher_prompt_file", "cu_teacher_prompt_template", _DEFAULT_TEACHER_PROMPT,
+            )
+        else:
+            self.cu_teacher_prompt_template = _DEFAULT_TEACHER_PROMPT
 
         _teacher_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("teacher", None)
         if _teacher_cfg and _teacher_cfg.get("enabled", False):
@@ -962,7 +969,7 @@ class RayPPOTrainer:
                     )
 
                 if use_feedback or has_solution or use_reflection:
-                    reprompt_text = TEACHER_PROMPT.format(
+                    reprompt_text = self.cu_teacher_prompt_template.format(
                         prompt=prompt_texts[i],
                         previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
                         feedback=feedback_section,

@@ -402,6 +402,23 @@ def _short_trace(e, limit=3):
     return "\n".join(lines)
 
 
+def _parse_json_args(text):
+    """Parse multiple JSON values from a single string using streaming decode."""
+    decoder = json.JSONDecoder()
+    args = []
+    idx = 0
+    n = len(text)
+    while idx < n:
+        while idx < n and text[idx] in ' \t\n\r':
+            idx += 1
+        if idx >= n:
+            break
+        obj, end_idx = decoder.raw_decode(text, idx)
+        args.append(obj)
+        idx = end_idx
+    return args
+
+
 def run_test_func(completion, test_input, test_output, fn_name, namespace=None):
     namespace = _create_sandbox_namespace() if namespace is None else namespace
     # compile with postponed annotations (equivalent to: from __future__ import annotations)
@@ -443,7 +460,7 @@ def run_test_func(completion, test_input, test_output, fn_name, namespace=None):
         if isinstance(test_input, dict):
             result_output = namespace[func_name](**test_input)
         else:
-            test_input_args = [json.loads(x) for x in test_input.split()]
+            test_input_args = _parse_json_args(test_input)
             result_output = namespace[func_name](*test_input_args)
 
         # Enforce structural, JSON-like equality; reject custom objects
@@ -819,6 +836,7 @@ def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases, max_wo
             records.append(result)
 
             # clean-up process
+            parent_conn.close()
             p.join(timeout=0)
             if p.is_alive():
                 p.kill()

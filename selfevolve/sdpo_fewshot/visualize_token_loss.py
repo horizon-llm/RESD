@@ -16,7 +16,6 @@ Examples:
 import argparse
 import html
 import json
-import math
 import os
 from pathlib import Path
 
@@ -29,9 +28,10 @@ import torch
 
 FIELD_REGISTRY = {
     "token_distill_loss": {"label": "Distillation Loss (per token)", "cmap": "sequential"},
-    "log_ratio": {"label": "Advantage log p_teacher/p_student", "cmap": "diverging"},
+    "log_ratio": {"label": "Advantage log p_teacher/p_student", "cmap": "category"},
     "student_entropy": {"label": "Entropy (student)", "cmap": "sequential"},
     "teacher_entropy": {"label": "Entropy (teacher)", "cmap": "sequential"},
+    "topk_log_ratio_dist": {"label": "Top-K Log Ratio Density", "cmap": "diverging", "renderer": "density"},
 }
 
 
@@ -72,6 +72,11 @@ def _preprocess_dump(dump: dict) -> dict:
     for prefix, topk_key in [("student", "student_topk_logps"), ("teacher", "teacher_topk_logps")]:
         if topk_key in dump:
             dump[f"{prefix}_entropy"] = _compute_entropy_from_topk(dump[topk_key])
+    # Compute top-k log ratio distribution: (bs, response_len, k)
+    if "teacher_topk_logps" in dump and "student_topk_logps" in dump:
+        dump["topk_log_ratio"] = dump["teacher_topk_logps"] - dump["student_topk_logps"]
+        # Marker so this field shows up in get_default_fields
+        dump["topk_log_ratio_dist"] = True
     return dump
 
 
@@ -100,7 +105,22 @@ def value_to_color(value: float, vmin: float, vmax: float, cmap: str = "divergin
     if vmax == vmin:
         return "rgba(255,255,255,0)"
 
-    if cmap == "diverging":
+    if cmap == "category":
+        # Promotion (green, positive) vs Suppression (red, negative)
+        abs_max = max(abs(vmin), abs(vmax))
+        if abs_max == 0:
+            return "rgba(255,255,255,0)"
+        t = value / abs_max
+        t = max(-1.0, min(1.0, t))
+        # Sqrt scaling to make moderate values more visible with long-tailed distributions
+        intensity = abs(t) ** 0.5
+        if t < 0:  # suppression (red)
+            r, g, b = 255, int(255 * (1 - 0.6 * intensity)), int(255 * (1 - 0.7 * intensity))
+        else:  # promotion (green)
+            r, g, b = int(255 * (1 - 0.7 * intensity)), 255, int(255 * (1 - 0.6 * intensity))
+        alpha = 0.2 + 0.7 * intensity
+        return f"rgba({r},{g},{b},{alpha:.2f})"
+    elif cmap == "diverging":
         abs_max = max(abs(vmin), abs(vmax))
         if abs_max == 0:
             return "rgba(255,255,255,0)"
@@ -220,6 +240,129 @@ def render_sample_html(
     return "\n".join(parts)
 
 
+
+def _svg_density_single(flat: torch.Tensor, n_bins: int = 60) -> str:
+    """Render a single-color SVG density chart for all top-k log ratios."""
+    if flat.numel() == 0:
+        return ""
+    min_v = flat.min().item()
+    max_v = flat.max().item()
+    if max_v == min_v:
+        max_v = min_v + 1.0
+    bin_width = (max_v - min_v) / n_bins
+
+    counts = torch.histc(flat.float(), bins=n_bins, min=min_v, max=max_v).tolist()
+    total = flat.numel()
+    density = [c / (total * bin_width) for c in counts]
+    max_density = max(density) if density else 1.0
+    if max_density == 0:
+        max_density = 1.0
+
+    svg_w, svg_h = 700, 260
+    margin_l, margin_r, margin_t, margin_b = 60, 15, 20, 45
+    plot_w = svg_w - margin_l - margin_r
+    plot_h = svg_h - margin_t - margin_b
+
+    parts = [
+        f'<svg width="{svg_w}" height="{svg_h}" xmlns="http://www.w3.org/2000/svg" '
+        f'style="background:#12122a;border-radius:6px;">'
+    ]
+
+    # Filled density curve — blue for negative bins, red for positive
+    for i, d in enumerate(density):
+        if d == 0:
+            continue
+        bin_center = min_v + (i + 0.5) * bin_width
+        bar_w = plot_w / n_bins
+        bar_h = (d / max_density) * plot_h
+        x = margin_l + i * bar_w
+        y = margin_t + plot_h - bar_h
+        fill = "rgba(100,150,255,0.7)" if bin_center < 0 else "rgba(255,100,100,0.7)"
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.2f}" height="{bar_h:.1f}" fill="{fill}">'
+            f'<title>[{min_v + i * bin_width:.3f}, {min_v + (i+1) * bin_width:.3f}): {d:.4f}</title></rect>'
+        )
+
+    # Zero line
+    if min_v < 0 < max_v:
+        zero_x = margin_l + ((0 - min_v) / (max_v - min_v)) * plot_w
+        parts.append(
+            f'<line x1="{zero_x:.1f}" y1="{margin_t}" x2="{zero_x:.1f}" '
+            f'y2="{margin_t + plot_h}" stroke="#ffcc00" stroke-width="1" stroke-dasharray="4,3"/>'
+        )
+
+    # Axes
+    parts.append(
+        f'<line x1="{margin_l}" y1="{margin_t + plot_h}" x2="{margin_l + plot_w}" '
+        f'y2="{margin_t + plot_h}" stroke="#666" stroke-width="1"/>'
+    )
+    parts.append(
+        f'<line x1="{margin_l}" y1="{margin_t}" x2="{margin_l}" '
+        f'y2="{margin_t + plot_h}" stroke="#666" stroke-width="1"/>'
+    )
+
+    # X ticks
+    for j in range(6):
+        frac = j / 5
+        val = min_v + frac * (max_v - min_v)
+        tx = margin_l + frac * plot_w
+        parts.append(
+            f'<text x="{tx:.1f}" y="{margin_t + plot_h + 15}" fill="#999" font-size="10" '
+            f'text-anchor="middle" font-family="monospace">{val:.2f}</text>'
+        )
+    # Y ticks
+    parts.append(
+        f'<text x="{margin_l - 6}" y="{margin_t + 4}" fill="#999" font-size="9" '
+        f'text-anchor="end" font-family="monospace">{max_density:.2f}</text>'
+    )
+    parts.append(
+        f'<text x="{margin_l - 6}" y="{margin_t + plot_h}" fill="#999" font-size="9" '
+        f'text-anchor="end" font-family="monospace">0</text>'
+    )
+    # Axis labels
+    parts.append(
+        f'<text x="{margin_l + plot_w / 2}" y="{svg_h - 3}" fill="#aaa" font-size="11" '
+        f'text-anchor="middle" font-family="monospace">log(p_teacher / p_student)</text>'
+    )
+    parts.append(
+        f'<text x="{margin_l - 6}" y="{margin_t + plot_h / 2}" fill="#aaa" font-size="10" '
+        f'text-anchor="middle" font-family="monospace" '
+        f'transform="rotate(-90,{margin_l - 40},{margin_t + plot_h / 2})">density</text>'
+    )
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+
+def _render_density_section(
+    sample_idx: int,
+    topk_log_ratios: torch.Tensor,
+    field_label: str,
+) -> str:
+    """Render a single-color density chart for one sample (all top-k log ratios).
+
+    Computes over the entire top-k at every position (not just masked/generated tokens).
+    """
+    all_flat = topk_log_ratios.reshape(-1)
+    if all_flat.numel() == 0:
+        return ""
+    mean_v = all_flat.mean().item()
+    std_v = all_flat.std().item() if all_flat.numel() > 1 else 0.0
+    median_v = all_flat.median().item()
+    min_v = all_flat.min().item()
+    max_v = all_flat.max().item()
+    parts = [f'<div class="sample">', f'<h3>Sample {sample_idx}</h3>']
+    parts.append(f'<div class="stats"><b>{field_label}</b>: mean={mean_v:.4f}, std={std_v:.4f}, '
+                 f'median={median_v:.4f}, min={min_v:.4f}, max={max_v:.4f}, '
+                 f'num_positions={topk_log_ratios.shape[0]}, k={topk_log_ratios.shape[1]}</div>')
+    parts.append('<div class="dist-chart">')
+    parts.append(_svg_density_single(all_flat))
+    parts.append('</div></div>')
+    return "\n".join(parts)
+
+
+
 # ── HTML template ───────────────────────────────────────────────────────────
 
 HTML_HEADER = """\
@@ -337,6 +480,15 @@ h3 {{
 }}
 .toc a:hover {{
     text-decoration: underline;
+}}
+.dist-layout {{
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    margin: 8px 0;
+}}
+.dist-chart {{
+    flex: 1;
 }}
 .topk-clickable {{
     cursor: pointer;
@@ -474,8 +626,27 @@ def build_html(dump: dict, tokenizer, fields: list[str] | None = None, title: st
         if field not in dump:
             continue
         meta = FIELD_REGISTRY.get(field, {"label": field, "cmap": "diverging"})
+        renderer = meta.get("renderer", "token")
         html_parts.append(f'<div class="field-section" id="{field}">')
         html_parts.append(f'<h2>{meta["label"]}</h2>')
+
+        # Topk-based density renderer
+        if renderer == "density":
+            topk_ratios = dump.get("topk_log_ratio")
+            if topk_ratios is None:
+                html_parts.append("<p>No top-k data available.</p>")
+                html_parts.append("</div>")
+                continue
+            for i in range(n_samples):
+                resp_ids = response_ids[i]
+                content_end = _find_content_end(resp_ids, tokenizer)
+                sample_ratios = topk_ratios[i, :content_end]
+                html_parts.append(_render_density_section(
+                    i, sample_ratios, meta["label"],
+                ))
+            html_parts.append("</div>")
+            continue
+
         values = dump[field]  # (n, response_len)
 
         for i in range(n_samples):
@@ -586,7 +757,7 @@ def main():
         "--field",
         type=str,
         default=None,
-        help="Field to visualize (token_distill_loss, log_ratio, student_entropy, teacher_entropy). "
+        help="Field to visualize (token_distill_loss, log_ratio, student_entropy, teacher_entropy, topk_log_ratio_dist). "
         "Default: all available fields.",
     )
     parser.add_argument("--out", type=str, default=None, help="Output HTML path (default: auto)")

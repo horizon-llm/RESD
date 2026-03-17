@@ -1211,6 +1211,75 @@ def compute_self_distillation_loss(
         log_ratio = student_log_probs - teacher_log_probs
         per_token_loss = log_ratio.detach() * student_log_probs
 
+    # Entropy-based token filtering: select tokens based on various entropy criteria.
+    # Supports: entropy_filter_ratio (new) or entropy_diff_filter_ratio (legacy, equivalent to criterion="diff").
+    entropy_filter_ratio = getattr(self_distillation_config, 'entropy_filter_ratio', None)
+    entropy_diff_filter_ratio = getattr(self_distillation_config, 'entropy_diff_filter_ratio', None)
+    # Legacy fallback: entropy_diff_filter_ratio → entropy_filter_ratio with criterion="diff"
+    _effective_filter_ratio = entropy_filter_ratio if entropy_filter_ratio is not None else entropy_diff_filter_ratio
+    if _effective_filter_ratio is not None:
+        criterion = getattr(self_distillation_config, 'entropy_filter_criterion', 'diff')
+
+        # Use raw input log probs (before any clamping) for entropy computation
+        if student_topk_log_probs is not None and teacher_topk_log_probs is not None:
+            t_logp, s_logp = teacher_topk_log_probs, student_topk_log_probs
+        elif student_all_log_probs is not None and teacher_all_log_probs is not None:
+            t_logp, s_logp = teacher_all_log_probs, student_all_log_probs
+        else:
+            raise ValueError("entropy_filter_ratio requires topk or full log probs to compute entropy.")
+
+        # H = -sum(p * log_p), summed over vocab dimension
+        teacher_entropy = -(t_logp.exp() * t_logp).sum(-1)  # (bs, seq_len)
+        student_entropy = -(s_logp.exp() * s_logp).sum(-1)  # (bs, seq_len)
+
+        # Compute the scoring signal based on criterion.
+        # "descending=True" criteria: higher score → keep token.
+        # For "ascending" criteria (teacher_low, student_low), we negate so we can always sort descending.
+        if criterion == "diff":
+            # Keep tokens where (teacher_H - student_H) is large
+            score = teacher_entropy - student_entropy
+        elif criterion == "teacher_low":
+            # Keep tokens where teacher entropy is LOW (confident teacher → high-quality signal)
+            score = -teacher_entropy
+        elif criterion == "teacher_high":
+            # Keep tokens where teacher entropy is HIGH (uncertain teacher → diverse signal)
+            score = teacher_entropy
+        elif criterion == "student_high":
+            # Keep tokens where student entropy is HIGH (confused student → needs learning)
+            score = student_entropy
+        elif criterion == "student_low":
+            # Keep tokens where student entropy is LOW (confident student)
+            score = -student_entropy
+        elif criterion == "ratio":
+            # Keep tokens where teacher_H / student_H is large (relative uncertainty)
+            score = teacher_entropy / student_entropy.clamp(min=1e-8)
+        else:
+            raise ValueError(f"Unknown entropy_filter_criterion: {criterion}")
+
+        # Log average loss BEFORE filtering
+        resp_denom = response_mask.sum().clamp(min=1.0)
+        loss_mask_denom = loss_mask.sum().clamp(min=1.0)
+        metrics["actor/entropy_filter_loss_before"] = ((per_token_loss.detach() * loss_mask).sum() / loss_mask_denom).detach().item()
+
+        # Per-sequence top-k filtering: keep top _effective_filter_ratio fraction of valid tokens
+        score_for_sort = score.masked_fill(~loss_mask.bool(), float('-inf'))
+        num_valid = loss_mask.sum(dim=-1)                                              # (bs,)
+        num_keep = (num_valid * _effective_filter_ratio).ceil().long().clamp(min=1)     # (bs,)
+
+        sorted_vals, _ = score_for_sort.sort(dim=-1, descending=True)
+        thresholds = sorted_vals.gather(-1, (num_keep - 1).clamp(min=0).unsqueeze(-1))  # (bs, 1)
+        entropy_filter_mask = (score >= thresholds).float()
+        loss_mask = loss_mask * entropy_filter_mask
+
+        # Log average loss AFTER filtering
+        filtered_denom = loss_mask.sum().clamp(min=1.0)
+        metrics["actor/entropy_filter_loss_after"] = ((per_token_loss.detach() * loss_mask).sum() / filtered_denom).detach().item()
+
+        metrics["actor/entropy_filter_teacher_H_mean"] = ((teacher_entropy * response_mask).sum() / resp_denom).detach().item()
+        metrics["actor/entropy_filter_student_H_mean"] = ((student_entropy * response_mask).sum() / resp_denom).detach().item()
+        metrics["actor/entropy_filter_diff_mean"] = (((teacher_entropy - student_entropy) * response_mask).sum() / resp_denom).detach().item()
+        metrics["actor/entropy_filter_kept_ratio"] = (loss_mask.sum() / resp_denom).detach().item()
+
     is_clip = self_distillation_config.is_clip
     if is_clip is not None:
         if old_log_probs is None:

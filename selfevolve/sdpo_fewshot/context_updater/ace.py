@@ -9,7 +9,8 @@ import numpy as np
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
-from .prompts import REFLECTOR_PROMPT, CURATOR_PROMPT
+from .prompts import REFLECTOR_PROMPT as _DEFAULT_REFLECTOR_PROMPT
+from .prompts import CURATOR_PROMPT as _DEFAULT_CURATOR_PROMPT
 from .playbook_utils import extract_playbook_bullets, update_bullet_counts, get_playbook_stats, extract_json_from_text, apply_curator_operations, parse_playbook_line
 
 
@@ -234,9 +235,34 @@ class ACEContextUpdater:
     def __init__(self, config):
         self.config = config
 
+        # Resolve prompt templates.
+        # Priority: file path > inline template > built-in default.
+        ctx_cfg = config.actor_rollout_ref.actor.get("self_distillation", {}).get("context_updater", None)
+        self.reflector_prompt_template = self._resolve_prompt_template(
+            ctx_cfg, "reflector_prompt_file", "reflector_prompt_template", _DEFAULT_REFLECTOR_PROMPT,
+        )
+        self.curator_prompt_template = self._resolve_prompt_template(
+            ctx_cfg, "curator_prompt_file", "curator_prompt_template", _DEFAULT_CURATOR_PROMPT,
+        )
+
         self.playbook = self.get_empty_playbook()
         self.next_global_id = 1
         self.context_update_count = 0
+
+    @staticmethod
+    def _resolve_prompt_template(ctx_cfg, file_key: str, template_key: str, default: str) -> str:
+        """Resolve a prompt template with priority: file > inline template > built-in default."""
+        if ctx_cfg is not None:
+            file_path = getattr(ctx_cfg, file_key, None)
+            if file_path:
+                with open(file_path, "r") as f:
+                    content = f.read()
+                print(f"[ACE] Loaded {template_key} from file: {file_path}")
+                return content
+            inline = getattr(ctx_cfg, template_key, None)
+            if inline:
+                return inline
+        return default
 
     def state_dict(self) -> dict:
         """Return serializable state for checkpoint saving."""
@@ -429,7 +455,7 @@ class ACEContextUpdater:
         # prepare reflector prompts (only for incorrect samples)
         reflector_prompts = []
         for prompt, response, feedback, teacher_feedback in zip(inc_prompt_texts, inc_response_texts, inc_feedback_list, inc_teacher_feedback_list):
-            reflector_prompt = REFLECTOR_PROMPT.format(
+            reflector_prompt = self.reflector_prompt_template.format(
                 prompt=prompt,
                 response=_remove_thinking_trace(response),
                 feedback=feedback or "",
@@ -484,7 +510,7 @@ class ACEContextUpdater:
         stats_str = json.dumps(stats, indent=2)
         curator_prompts = []
         for prompt, reflection in zip(inc_prompt_texts, inc_reflection_texts):
-            curator_prompt = CURATOR_PROMPT.format(
+            curator_prompt = self.curator_prompt_template.format(
                 prompt=prompt,
                 recent_reflection=_remove_thinking_trace(reflection),
                 playbook_stats=stats_str,

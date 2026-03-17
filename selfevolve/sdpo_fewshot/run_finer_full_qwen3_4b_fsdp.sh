@@ -70,6 +70,9 @@ teacher_prob_min_ratio=${teacher_prob_min_ratio:-null} # Clamp teacher prob to b
 teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
 position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
 position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True
+entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] fraction of tokens to keep per sequence by (teacher_H - student_H); null disables
+entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
+entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
 # === context updater ===
 use_context_updater=${use_context_updater:-False}
 concise_frequency=${concise_frequency:-4} # how often to concise the context
@@ -108,6 +111,9 @@ _add tpmin   "$teacher_prob_min_ratio"     null
 _add tpmax   "$teacher_prob_max_ratio"     null
 _add pwe     "$position_weighting_enabled" False
 _add pwb     "$position_weighting_beta"    1.0
+_add edfr    "$entropy_diff_filter_ratio"  null
+_add efr     "$entropy_filter_ratio"      null
+_add efc     "$entropy_filter_criterion"  diff
 _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
@@ -207,6 +213,9 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
     actor_rollout_ref.actor.self_distillation.position_weighting_beta=${position_weighting_beta}
+    actor_rollout_ref.actor.self_distillation.entropy_diff_filter_ratio=${entropy_diff_filter_ratio}
+    actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
+    actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
 )
 
 CONTEXT_UPDATER=(
@@ -258,7 +267,7 @@ TRAINER=(
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=4
-    trainer.test_freq=4
+    trainer.test_freq=8
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"
