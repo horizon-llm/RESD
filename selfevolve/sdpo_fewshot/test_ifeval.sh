@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+python -m pip install langdetect immutabledict nltk
+
 # ---- Usage ----
 # Test a local checkpoint:
 #   CHECKPOINT_PATH=checkpoints/sdpo_finer/my_exp/global_step_100 bash selfevolve/sdpo_fewshot/test_finer.sh
