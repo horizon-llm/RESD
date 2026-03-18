@@ -1,4 +1,9 @@
+"""
+preprocess functions for the datasets used in paper "RL Grokking Recipe: How RL Unlocks and Transfers New Algorithms in LLMs"
+"""
+
 import os
+import json
 import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -43,94 +48,58 @@ def write_rowgrouped_large(ds, path: str, rows_per_group: int = 32):
             writer.close()
 
 
-def make_map_fn(split: str):
+def make_map_fn(split: str, data_source_suffix):
     def process_fn(example, idx):
-        question = example.pop("prompt")
-        system = example.get("system", None)
-        solution = example.pop("answer")
-        global_id = example.pop("idx")
-
-        tests = example.pop("tests")
-        description = example.pop("description")
-        reward_style = example.pop("kind")
-
-        if split == "train" and "achievement_prior" in example.keys():
-            achievement_prior = example.pop("achievement_prior")
-        else:
-            achievement_prior = 0
-
-        data_source = example.pop("dataset")
-        elo = example.pop("elo")
-
-        if reward_style == "code":
-            solution = tests
-
-        # remove 'self' from method signature if present
-        if data_source == "livecodebench":
-            question = question.replace('(self, ', '(')
-            description = description.replace('(self, ', '(')
-
+        messages = example.pop("messages")
         extra_info = {
             "split": split,
-            "index": f"{global_id}",
-            "description": description,
-            "problem": question,
-            "elo": elo,
-            "achievement_prior": achievement_prior
+            "index": f"{example.pop("id")}",
+            "difficulty": example.pop("difficulty"),
+            "problem_family": example.pop("problem_family"),
+            "name": example.pop("name"),
         }
 
-        if system is not None:
-            messages = [{
-                "role": "system",
-                "content": system,
-            }]
-        else:
-            messages = []
         return {
-            "data_source": data_source, # this decides the reward function to use
-            "prompt": messages + [{
-                "role": "user",
-                "content": question,
-            }],
-            "ability": reward_style,
-            "reward_model": {"style": reward_style, "ground_truth": solution},
+            "data_source": example.pop("dataset") + "-" + data_source_suffix,
+            "prompt": messages,
+            "ability": "manufactoria",
+            "reward_model": {"style": "manufactoria", "ground_truth": json.dumps(example.pop("ground_truth"))},
             "extra_info": extra_info,
         }
 
     return process_fn
 
 
-def _map_in_shards(dataset, split: str, num_shards: int, num_proc: int):
+def _map_in_shards(dataset, split: str, num_shards: int, num_proc: int, data_source_suffix: str):
     processed_shards = []
     for i in range(num_shards):
         shard = dataset.shard(num_shards=num_shards, index=i)
-        shard = shard.map(function=make_map_fn(split), with_indices=True, num_proc=num_proc)
+        shard = shard.map(function=make_map_fn(split, data_source_suffix), with_indices=True, num_proc=num_proc)
         processed_shards.append(shard)
     return datasets.concatenate_datasets(processed_shards)
 
 
-def run_proprocessing(data_source, num_proc=4, num_data=-1):
-    print(data_source)
-    train_dataset = datasets.load_dataset("json", data_files=os.path.join(data_source, 'train.json'), split='train')
+def run_proprocessing(train_data_source, test_data_source, data_source_suffix, num_proc=4, num_data=-1):
+    print("Train data source: ", train_data_source)
+    print("Test data source: ", test_data_source)
+    train_dataset = datasets.load_dataset(train_data_source, split="train")
+    test_dataset = datasets.load_dataset(test_data_source, split="train")
     if num_data != -1:
         train_dataset = train_dataset.select(range(min(num_data, len(train_dataset))))
-    try:
-        test_dataset = datasets.load_dataset("json", data_files=os.path.join(data_source, 'test.json'), split='train')
-    except:
-        test_dataset = datasets.load_dataset("json", data_files=os.path.join(data_source, 'test.json'), split='test')
 
     print(f"Map Datasets {train_dataset.num_rows} train, {test_dataset.num_rows} test")
     num_shards = min(4, (len(train_dataset) // 1000) + 1)
     print(f"Using {num_shards} shards")
     num_proc = min(num_proc, num_shards)
     print(f"Using {num_proc} processes")
-    train_ds = _map_in_shards(train_dataset, "train", num_shards=num_shards, num_proc=num_proc)
+    train_ds = _map_in_shards(train_dataset, "train", num_shards=num_shards, num_proc=num_proc, data_source_suffix=data_source_suffix)
     print(train_ds)
-    test_ds = _map_in_shards(test_dataset, "test", num_shards=num_shards, num_proc=num_proc)
+    test_ds = _map_in_shards(test_dataset, "test", num_shards=num_shards, num_proc=num_proc, data_source_suffix=data_source_suffix)
     print(test_ds)
 
-    out_train = os.path.join(data_source, f"train_{num_data}.parquet")
-    out_test  = os.path.join(data_source, "test.parquet")
+    out_train = os.path.join("selfevolve/sdpo/datasets/manufactoria", f"train_{num_data}.parquet")
+    out_test  = os.path.join("selfevolve/sdpo/datasets/manufactoria", "test.parquet")
+    os.makedirs(os.path.dirname(out_train), exist_ok=True)
     write_rowgrouped_large(train_ds, out_train)
     write_rowgrouped_large(test_ds, out_test)
 
@@ -157,7 +126,11 @@ if __name__ == "__main__":
         description="Produce sorted dataset that can be used for training on most relevant questions."
     )
     parser.add_argument(
-        "--data_source", type=str,
+        "--train_data_source", type=str,
+        help="HF dataset name."
+    )
+    parser.add_argument(
+        "--test_data_source", type=str,
         help="HF dataset name."
     )
     parser.add_argument(
@@ -167,12 +140,10 @@ if __name__ == "__main__":
         help="Optional limit on number of training samples to process (default: all).",
     )
     parser.add_argument(
-        "--truncate_parquet", type=str, default=None,
-        help="Path to an existing parquet file to truncate (skips JSON preprocessing).",
+        "--data_source_suffix", type=str,
+        default="",
+        help="Suffix appended to the dataset name to form the data_source field."
     )
     args = parser.parse_args()
 
-    if args.truncate_parquet:
-        truncate_parquet(input_parquet=args.truncate_parquet, num_data=args.num_data)
-    else:
-        run_proprocessing(data_source=args.data_source, num_data=args.num_data)
+    run_proprocessing(train_data_source=args.train_data_source, test_data_source=args.test_data_source, data_source_suffix=args.data_source_suffix, num_data=args.num_data)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+python -m pip install matplotlib
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -11,7 +13,6 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
-# export RAY_DEBUG=1
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
@@ -23,14 +24,18 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/math/deepmath.parquet --num_data $NUM_DATA
+python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
+    --train_data_source manufactoria/has_train \
+    --test_data_source manufactoria/has_test \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "has"
 
-train_path=selfevolve/sdpo/datasets/math/deepmath_${NUM_DATA}.parquet
-val_path='[selfevolve/sdpo/datasets/math/aime25.parquet,selfevolve/sdpo/datasets/math/aime26.parquet]'
+train_path=selfevolve/sdpo/datasets/manufactoria/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo/datasets/manufactoria/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=math
+TASK=manufactoria
 export TASK
 
 # === optim ===
@@ -78,8 +83,10 @@ cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file wit
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
+# === reward function ===
+sparse_rewards=${sparse_rewards:-False} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_math'
+project_name='sdpo_manufactoria'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -124,6 +131,7 @@ _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
+_add sparse  "$sparse_rewards"             False
 
 ########################### Sync Results ###########################
 
@@ -173,8 +181,9 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/math.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/manufactoria.py
     custom_reward_function.name=compute_score
+    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
@@ -266,8 +275,8 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=4
-    trainer.test_freq=4
+    trainer.save_freq=8
+    trainer.test_freq=8
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"

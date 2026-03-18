@@ -198,6 +198,7 @@ self_distillation:
   entropy_filter_ratio: null
   # Criterion for entropy-based token filtering. Options:
   #   "diff"          - keep high (teacher_H - student_H)
+  #   "abs_diff"      - keep high |teacher_H - student_H|
   #   "teacher_low"   - keep low teacher entropy (confident teacher)
   #   "teacher_high"  - keep high teacher entropy (uncertain teacher)
   #   "student_high"  - keep high student entropy (confused student)

@@ -155,6 +155,7 @@ class SelfDistillationConfig(BaseConfig):
         entropy_filter_ratio (Optional[float]): Fraction of tokens to keep per sequence based on entropy_filter_criterion. None disables.
         entropy_filter_criterion (str): Which entropy criterion to use for filtering. Options:
             - "diff": keep tokens with high (teacher_entropy - student_entropy). Teacher uncertain, student confident.
+            - "abs_diff": keep tokens with high |teacher_entropy - student_entropy|. Biggest entropy gap regardless of sign.
             - "teacher_low": keep tokens with LOW teacher entropy. Teacher is confident (high-quality signal).
             - "teacher_high": keep tokens with HIGH teacher entropy. Teacher is uncertain (diverse signal).
             - "student_high": keep tokens with HIGH student entropy. Student is confused (needs learning).
@@ -323,6 +324,20 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.teacher_prob_min_ratio must be <= teacher_prob_max_ratio, got "
                 f"{self.teacher_prob_min_ratio} > {self.teacher_prob_max_ratio}"
+            )
+        valid_entropy_filter_criteria = ["diff", "abs_diff", "teacher_low", "teacher_high", "student_high", "student_low", "ratio"]
+        if self.entropy_filter_criterion not in valid_entropy_filter_criteria:
+            raise ValueError(
+                f"self_distillation.entropy_filter_criterion must be one of "
+                f"{valid_entropy_filter_criteria}, got {self.entropy_filter_criterion}"
+            )
+        if self.entropy_filter_ratio is not None and not (0.0 < self.entropy_filter_ratio <= 1.0):
+            raise ValueError(
+                f"self_distillation.entropy_filter_ratio must be in (0, 1], got {self.entropy_filter_ratio}"
+            )
+        if self.entropy_diff_filter_ratio is not None and not (0.0 < self.entropy_diff_filter_ratio <= 1.0):
+            raise ValueError(
+                f"self_distillation.entropy_diff_filter_ratio must be in (0, 1], got {self.entropy_diff_filter_ratio}"
             )
         if self.position_weighting_beta <= 0.0:
             raise ValueError(

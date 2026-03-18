@@ -1250,6 +1250,9 @@ def compute_self_distillation_loss(
         elif criterion == "student_low":
             # Keep tokens where student entropy is LOW (confident student)
             score = -student_entropy
+        elif criterion == "abs_diff":
+            # Keep tokens where |teacher_H - student_H| is large (biggest entropy gap regardless of sign)
+            score = (teacher_entropy - student_entropy).abs()
         elif criterion == "ratio":
             # Keep tokens where teacher_H / student_H is large (relative uncertainty)
             score = teacher_entropy / student_entropy.clamp(min=1e-8)

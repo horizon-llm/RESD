@@ -1,55 +1,45 @@
 """
 Manufactoria DSL reward function for iterative self-evolve training.
 
-Adapted from ManufactoriaVerifier in:
-  rl-grok-recipe/open-instruct/open_instruct/ground_truth_utils.py
+Adapted from:
+  - ManufactoriaVerifier in rl-grok-recipe/open-instruct/open_instruct/ground_truth_utils.py
+  - manufactoria_api.py  in rl-grok-recipe/manufactoria/verifier/manufactoria_api.py
+  - manufactoria_parser.py in rl-grok-recipe/manufactoria/verifier/manufactoria_parser.py
 
 Design:
-  - The original verifier is a class (ManufactoriaVerifier) that calls an external
-    Manufactoria DSL execution API to run test cases. This module flattens that into
-    a standalone compute_score() matching the interface used by code.py.
+  - The original verifier (ManufactoriaVerifier) calls an external API to execute
+    Manufactoria DSL code against test cases. Here we embed the parser and executor
+    locally (copied into ./manufactoria/verifier/) so we can capture detailed
+    tracebacks — execution path, rejection reasons, and parse errors with line
+    numbers — and format them as feedback, analogous to code.py's _short_trace.
   - DSL code is extracted from the last ```manufactoria ... ``` block in the model output.
-  - Verification is delegated to an external API (default: http://localhost:8080/verify)
-    which accepts {dsl, test_cases, max_execution_time} and returns per-test pass/fail
-    results with rejection reasons.
   - Scoring supports both sparse (all-or-nothing) and dense (pass rate) modes,
     controlled by sparse_rewards and the split field in extra_info.
   - Feedback is rendered in a LeetCode-like style (Runtime Error / Wrong Answer)
     consistent with code.py's format_test_feedback.
-
-API response format (expected):
-  {
-    "valid": bool,               # whether the DSL parsed successfully
-    "message": str,              # error message if valid=False
-    "all_passed": bool,          # whether all test cases passed
-    "results": [                 # per-test-case results
-      {
-        "passed": bool,
-        "input": str,            # input tape
-        "output": str,           # actual output tape
-        "expected_output": str,  # expected output tape
-        "rejection_reason": str  # reason for failure (if any)
-      },
-      ...
-    ]
-  }
 """
 
-import asyncio
 import json
+import os
+import random
 import re
+import sys
 from typing import Optional
 
 import numpy as np
-import requests
+
+# Ensure the sibling `manufactoria/` package is importable when this file
+# is loaded standalone (e.g. via importlib.util.spec_from_file_location).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from manufactoria.verifier.manufactoria_parser import (
+    ParseError,
+    create_robot_factory,
+)
 
 INCORRECT_FORMAT = "Incorrect format"
 TIMEOUT = "Time out"
 ERROR_PREFIX = "Error: "
 FORMAT_PENALTY = False
-
-DEFAULT_API_URL = "http://localhost:8080/verify"
-DEFAULT_MAX_EXECUTION_TIME = 5.0
 
 
 def extract_manufactoria_code(model_output: str) -> Optional[str]:
@@ -61,59 +51,113 @@ def extract_manufactoria_code(model_output: str) -> Optional[str]:
     return matches[-1].strip()
 
 
-async def async_verify(dsl_code, test_cases, api_url, max_execution_time):
-    """Call the Manufactoria verification API asynchronously."""
-    payload = {
-        "dsl": dsl_code,
-        "test_cases": test_cases,
-        "max_execution_time": max_execution_time,
-    }
+def _format_execution_trace(path, max_nodes=15):
+    """Format the execution path (list of node IDs) into a traceback-like string."""
+    if not path:
+        return ""
+    lines = []
+    if len(path) > max_nodes:
+        lines.append(f"  ... ({len(path) - max_nodes} earlier steps omitted)")
+        shown = path[-max_nodes:]
+        offset = len(path) - max_nodes
+    else:
+        shown = path
+        offset = 0
+    for j, node_id in enumerate(shown):
+        step = offset + j + 1
+        lines.append(f"  Step {step}: {node_id}")
+    return "\n".join(lines)
 
-    def make_request():
-        response = requests.post(
-            api_url, json=payload, headers={"Content-Type": "application/json"}
-        )
-        response.raise_for_status()
-        return response.json()
 
-    return await asyncio.to_thread(make_request)
-
-
-def _parse_api_results(api_response):
+def run_tests(dsl_code, test_cases):
     """
-    Parse API response into a list of record dicts matching the code.py format:
+    Run DSL code against test cases locally using the embedded parser/executor.
+
+    Returns a list of record dicts matching code.py's format:
       {test_idx, input, expected, actual, passed, debug, time}
     """
+    # Parse DSL
+    try:
+        factory = create_robot_factory(dsl_code)
+    except ParseError as e:
+        return [{
+            "test_idx": 0,
+            "input": None,
+            "expected": None,
+            "actual": f"{ERROR_PREFIX}DSL Parse Error: {e}",
+            "passed": False,
+            "debug": "",
+            "time": 0.0,
+        }]
+    except Exception as e:
+        return [{
+            "test_idx": 0,
+            "input": None,
+            "expected": None,
+            "actual": f"{ERROR_PREFIX}Unexpected parse error: {e}",
+            "passed": False,
+            "debug": "",
+            "time": 0.0,
+        }]
+
     records = []
+    for i, test_case in enumerate(test_cases):
+        input_tape = test_case.get("input", "")
+        expected_output = test_case.get("expected_output", "")
+        expected_accepted = test_case.get("expected_accepted", True)
+        check_output = test_case.get("check_output", True)
 
-    raw_results = api_response.get("results", [])
-    if not isinstance(raw_results, list):
-        return records
+        try:
+            result = factory.process_robot(input_tape)
 
-    for i, r in enumerate(raw_results):
-        if not isinstance(r, dict):
-            continue
+            # Determine pass/fail (same logic as manufactoria_api.py)
+            if check_output:
+                has_regex = any(c in expected_output for c in ['.', '+', '*', '?', '|', '(', ')'])
+                if has_regex:
+                    try:
+                        output_matches = bool(re.fullmatch(expected_output, result.final_tape))
+                    except re.error:
+                        output_matches = result.final_tape == expected_output
+                else:
+                    output_matches = result.final_tape == expected_output
+                passed = (output_matches and result.finished) == expected_accepted
+            else:
+                passed = (result.finished == expected_accepted)
 
-        passed = r.get("passed", False)
-        input_tape = r.get("input", "")
-        expected = r.get("expected_output", r.get("expected", ""))
-        actual_output = r.get("output", r.get("actual", ""))
-        rejection_reason = r.get("rejection_reason", "")
+            actual = result.final_tape
 
-        if passed:
-            actual = actual_output
-        elif rejection_reason:
-            actual = f"{ERROR_PREFIX}{rejection_reason}"
-        else:
-            actual = actual_output
+            # Build debug trace for failing tests
+            debug = ""
+            if not passed:
+                debug_parts = []
+                if result.path:
+                    debug_parts.append("Execution Trace:")
+                    debug_parts.append(_format_execution_trace(result.path))
+                if result.rejection_reason:
+                    debug_parts.append(f"Rejection: {result.rejection_reason}")
+                debug_parts.append(f"Finished: {result.finished}")
+                debug_parts.append(f"Actual output: '{result.final_tape}'")
+                if check_output:
+                    debug_parts.append(f"Expected output: '{expected_output}'")
+                debug_parts.append(f"Expected accepted: {expected_accepted}")
+                debug = "\n".join(debug_parts)
+
+            # For error cases, prefix the actual with ERROR_PREFIX
+            if not passed and result.rejection_reason:
+                actual = f"{ERROR_PREFIX}{result.rejection_reason}"
+
+        except Exception as e:
+            passed = False
+            actual = f"{ERROR_PREFIX}{e}"
+            debug = ""
 
         records.append({
             "test_idx": i,
             "input": input_tape,
-            "expected": expected,
+            "expected": expected_output,
             "actual": actual,
             "passed": passed,
-            "debug": "",
+            "debug": debug,
             "time": 0.0,
         })
 
@@ -129,6 +173,8 @@ def format_test_feedback(
     max_input_chars=250,
     max_expected_chars=250,
     max_actual_chars=250,
+    max_debug_lines=10,
+    max_debug_line_chars=300,
 ):
     """
     Render test feedback in a LeetCode-like style, matching code.py format.
@@ -167,11 +213,25 @@ def format_test_feedback(
 
     parts = []
 
+    def _render_debug_block(dbg_text):
+        dbg = (dbg_text or "").strip()
+        if not dbg:
+            return
+        parts.append("")
+        parts.append("Debug Output")
+        dbg_lines = dbg.split("\n")
+        limit = int(max_debug_lines) if max_debug_lines is not None else None
+        for line in dbg_lines[:limit]:
+            parts.append(_truncate_str(line, max_debug_line_chars))
+        if max_debug_lines is not None and len(dbg_lines) > int(max_debug_lines):
+            parts.append(f"... ({len(dbg_lines) - int(max_debug_lines)} more lines)")
+
     for r in failing:
         test_idx = r["test_idx"] + 1
         actual = r["actual"]
         expected = r["expected"]
         stdin = r["input"]
+        debug_text = r.get("debug", "")
 
         is_error = isinstance(actual, str) and actual.startswith(ERROR_PREFIX)
         is_incorrect_format = actual == INCORRECT_FORMAT
@@ -182,6 +242,7 @@ def format_test_feedback(
             parts.append("")
             parts.append("Last Executed Input")
             parts.append(_truncate_str(stdin, max_input_chars))
+            _render_debug_block(debug_text)
         elif is_incorrect_format:
             if was_truncated:
                 parts.append("Truncated Attempt: Your previous response was too long and truncated.")
@@ -199,6 +260,7 @@ def format_test_feedback(
                 parts.append("")
                 parts.append("Expected")
                 parts.append(_truncate_str(expected, max_expected_chars))
+            _render_debug_block(debug_text)
 
         parts.append("")
 
@@ -214,8 +276,6 @@ def compute_score(
     extra_info=None,
     sparse_rewards=False,
     max_test_cases=None,
-    api_url=DEFAULT_API_URL,
-    max_execution_time=DEFAULT_MAX_EXECUTION_TIME,
     **kwargs,
 ):
     split = extra_info["split"] if extra_info else "train"
@@ -247,8 +307,11 @@ def compute_score(
     if max_test_cases and split != "test":
         test_cases = test_cases[:max_test_cases]
 
+    # print(f"[compute_score] split={split}, num_test_cases={len(test_cases)}, sparse_rewards={sparse_rewards}")
+
     # Extract DSL code
     dsl_code = extract_manufactoria_code(solution_str)
+    # print(f"[compute_score] extracted DSL code: {dsl_code[:200] if dsl_code else None}")
     if dsl_code is None:
         return {
             "score": -0.5 if FORMAT_PENALTY and split == "train" and not was_truncated else 0.0,
@@ -266,56 +329,15 @@ def compute_score(
             ),
         }
 
-    # Call external API
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+    # Show a random sample of test cases
+    # sample_size = min(3, len(test_cases))
+    # sample_cases = random.sample(test_cases, sample_size)
+    # print(f"[compute_score] sample test cases ({sample_size}/{len(test_cases)}):")
+    # for tc in sample_cases:
+    #     print(f"  input={tc.get('input', '')!r}  expected_output={tc.get('expected_output', '')!r}  expected_accepted={tc.get('expected_accepted', True)}")
 
-        if loop and loop.is_running():
-            api_response = asyncio.ensure_future(
-                async_verify(dsl_code, test_cases, api_url, max_execution_time)
-            )
-            # If we're already in an async context, we need to await
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                api_response = pool.submit(
-                    lambda: asyncio.run(async_verify(dsl_code, test_cases, api_url, max_execution_time))
-                ).result()
-        else:
-            api_response = asyncio.run(
-                async_verify(dsl_code, test_cases, api_url, max_execution_time)
-            )
-    except Exception as e:
-        error_msg = f"API request failed: {e}"
-        print(error_msg)
-        return {
-            "score": 0.0,
-            "acc": 0.0,
-            "pred": dsl_code,
-            "incorrect_format": 0,
-            "error_in_test_cases": 1,
-            "timed_out": 0,
-            "truncated": 1 if was_truncated else 0,
-            "truncated_and_missing_answer": 0,
-            "feedback": error_msg,
-        }
-
-    # Check for DSL validation errors from the API
-    if "valid" in api_response and not api_response["valid"]:
-        dsl_error = api_response.get("message", "DSL validation failed")
-        records = [{
-            "test_idx": 0,
-            "input": None,
-            "expected": None,
-            "actual": f"{ERROR_PREFIX}{dsl_error}",
-            "passed": False,
-            "debug": "",
-            "time": 0.0,
-        }]
-    else:
-        records = _parse_api_results(api_response)
+    # Run tests locally
+    records = run_tests(dsl_code, test_cases)
 
     if not records:
         return {
@@ -327,8 +349,14 @@ def compute_score(
             "timed_out": 0,
             "truncated": 1 if was_truncated else 0,
             "truncated_and_missing_answer": 0,
-            "feedback": "No test results returned from API.",
+            "feedback": "No test results produced.",
         }
+
+    # Show a random sample of results
+    sample_records = random.sample(records, min(3, len(records)))
+    print(f"[compute_score] sample results ({len(sample_records)}/{len(records)}):")
+    for r in sample_records:
+        print(f"  test_idx={r['test_idx']}  input={r['input']!r}  expected={r['expected']!r}  actual={r['actual']!r}  passed={r['passed']}")
 
     # Compute metrics (matching code.py)
     correct_answers = [1.0 if r["passed"] else 0.0 for r in records]
@@ -352,6 +380,8 @@ def compute_score(
 
     if FORMAT_PENALTY and split == "train" and incorrect_format and not was_truncated:
         reward -= 0.5
+
+    print(f"[compute_score] score={reward}, acc={accuracy}, passed={sum(correct_answers)}/{len(correct_answers)}, error_in_test_cases={error_in_test_cases}, timed_out={timed_out}")
 
     return {
         "score": reward,
