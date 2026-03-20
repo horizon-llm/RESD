@@ -8,7 +8,7 @@ vllm serve $MODEL_DIR \
   --port 8004 \
   --tensor-parallel-size 2 \
   --dtype bfloat16 \
-  --gpu-memory-utilization 0.95 \
+  --gpu-memory-utilization 0.5 \
   --trust-remote-code \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \

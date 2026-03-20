@@ -1,6 +1,6 @@
 import importlib
 import json
-import re
+import os
 import sys
 import types
 from pathlib import Path
@@ -10,12 +10,31 @@ from typing import Any
 _IFEVAL_DIR = Path(__file__).resolve().parents[1] / "third_party" / "instruction_following_eval"
 
 
-def _remove_thinking_trace(text: str) -> str:
-    # Case 1: complete <think>...</think> block in response
-    out_text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
-    # Case 2: <think> was in the prompt, response starts with thinking content
-    out_text = re.sub(r'^.*?</think>\s*', '', out_text, flags=re.DOTALL)
-    return out_text
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clip_text(text: str, max_len: int = 1200) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "...<truncated>"
+
+
+def _debug_log_record(record: dict[str, Any]) -> None:
+    """Optional debug logging for per-sample reward inspection."""
+    log_path = '/data/hal245/op_distill/Iterative-OPD/selfevolve/sdpo_fewshot/debug/ifeval_reward_debug.jsonl'
+    if log_path:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    if _env_flag("SDPO_IFEVAL_DEBUG_PRINT", "0"):
+        try:
+            print("[IFeval-debug]", json.dumps(record, ensure_ascii=False))
+        except Exception:
+            pass
 
 
 def _ensure_ifeval_pkg() -> None:
@@ -76,11 +95,15 @@ def _check_following(
         try:
             instruction_cls = registry.INSTRUCTION_DICT[instruction_id]
             instruction = instruction_cls(instruction_id)
-            filtered_kwargs = {k: v for k, v in kwargs_list[idx].items() if v is not None}
-            instruction.build_description(**filtered_kwargs)
+            kwargs_item = kwargs_list[idx] if idx < len(kwargs_list) else {}
+            if not isinstance(kwargs_item, dict):
+                kwargs_item = {}
             args = instruction.get_instruction_args()
+            build_kwargs = dict(kwargs_item)
             if args and "prompt" in args:
-                instruction.build_description(prompt=prompt)
+                # Keep original kwargs while injecting prompt-dependent arguments.
+                build_kwargs["prompt"] = prompt
+            instruction.build_description(**build_kwargs)
 
             followed = False
             for cand in candidates:
@@ -112,6 +135,10 @@ def compute_score(solution_str: str, ground_truth: Any, extra_info: dict | None 
         prompt = gt.get("prompt", extra_info.get("prompt", ""))
         instruction_id_list = gt["instruction_id_list"]
         kwargs_list = gt["kwargs"]
+        if isinstance(instruction_id_list, str):
+            instruction_id_list = [instruction_id_list]
+        if isinstance(kwargs_list, dict):
+            kwargs_list = [kwargs_list]
         if not isinstance(instruction_id_list, list) or not isinstance(kwargs_list, list):
             raise ValueError("instruction_id_list/kwargs must be lists")
         if len(instruction_id_list) != len(kwargs_list):
@@ -168,6 +195,25 @@ def compute_score(solution_str: str, ground_truth: Any, extra_info: dict | None 
         },
         ensure_ascii=False,
     )
+
+    debug_record = {
+        "split": extra_info.get("split", ""),
+        "index": extra_info.get("index", ""),
+        "data_source": extra_info.get("data_source", "IFeval"),
+        "prompt": _clip_text(str(prompt)),
+        "response": _clip_text(response),
+        "instruction_id_list": instruction_id_list,
+        "instruction_count": len(instruction_id_list),
+        "kwargs_count": len(kwargs_list),
+        "strict_follow_instruction_list": strict_list,
+        "loose_follow_instruction_list": loose_list,
+        "failed_instruction_ids": failed_ids,
+        "score": float(score),
+        "acc": float(acc),
+        "incorrect_format": int(incorrect_format),
+        "feedback": feedback,
+    }
+    _debug_log_record(debug_record)
 
     return {
         "score": score,

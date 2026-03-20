@@ -3,12 +3,12 @@ import pandas as pd
 import os
 
 def stat1():
-    db_path="/data/hal245/op_distill/youtu-agent/test.db"
+    db_path="/data/hal245/op_distill/Iterative-OPD/selfevolve/grpo-train-free/youtu-agent/test.db"
     conn = sqlite3.connect(db_path)
     table_name = "evaluation_data"
     #target_exp_id = "qwen3-30b-a3b-thinking_math_AIME24_eval"
     #target_exp_id="qwen3-30b-a3b-math_AIME25_eval"
-    target_exp_id="qwen3-4b_math_AIME25_eval"
+    target_exp_id="qwen3-30b-a3b_math_practice_eval_step_1"
 
     query_acc = f"SELECT reward FROM {table_name} WHERE stage='judged' AND exp_id='{target_exp_id}'"
     df_acc = pd.read_sql_query(query_acc, conn)

@@ -3,7 +3,9 @@ from ....utils.reward_score.feedback import code
 from ....utils.reward_score.feedback import gpqa
 from ....utils.reward_score.feedback import mcq
 from ....utils.reward_score.feedback import tooluse
-
+from ....utils.reward_score.feedback import IFeval
+from ....utils.reward_score.feedback import qa
+from ....utils.reward_score.feedback import privacy
 
 def compute_score(
     data_source: str,
@@ -17,10 +19,16 @@ def compute_score(
         results = math.compute_score(solution_str, ground_truth, extra_info)
     elif data_source in ["gpqa"]:
         results = gpqa.compute_score(solution_str, ground_truth)
-    elif data_source in ["sciknoweval"]:
+    elif data_source in ["sciknoweval","MedQA"]:
         results = mcq.compute_score(solution_str, ground_truth)
     elif data_source in ["tooluse"]:
         results = tooluse.compute_score(solution_str, ground_truth)
+    elif data_source in ["IFeval"]:
+        results = IFeval.compute_score(solution_str, ground_truth, extra_info)
+    elif data_source in ["WikiDYK"]:
+        results = qa.compute_score(solution_str, ground_truth, extra_info)
+    elif data_source in ["ContextualIntegritySynthetic"]:
+        results = privacy.compute_score(solution_str, ground_truth, extra_info)
     else:
         raise ValueError(f"Reward style {data_source} not found.")
     return results

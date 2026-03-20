@@ -41,7 +41,12 @@ def _normalize_answer(answer_idx: Any) -> str:
 def _build_prompt(question: str, options: Any) -> str:
     question = "" if question is None else str(question).strip()
     options_block = _format_options(options)
-    return question + "\n\n" + options_block + "\nPlease reason step by step."
+    return (
+        question
+        + "\n\n"
+        + options_block
+        + "\nPlease reason step by step. In the end, output only the final answer in XML format: <answer>A</answer>, <answer>B</answer>, <answer>C</answer>, or <answer>D</answer>."
+    )
 
 
 def _build_record(example: dict[str, Any], idx: int) -> dict[str, Any]:

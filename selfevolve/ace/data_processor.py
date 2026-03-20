@@ -1,5 +1,9 @@
 import os
 import json
+import re
+import ast
+import codecs
+import subprocess
 from selfevolve.ace.utils import extract_answer
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,6 +102,10 @@ class DataProcessor:
             parse_fn = parse_instruction_and_input
         elif self.task_name == "formula":
             parse_fn = parse_context_and_question_formula
+        elif self.task_name == "scieval":
+            parse_fn = None
+        elif self.task_name == "livecodebench":
+            parse_fn = None
         else:
             raise ValueError(f"Unknown task: {self.task_name}")
 
@@ -105,8 +113,20 @@ class DataProcessor:
             context = item.get('context', '')
             target = item.get('target', '')
 
-            # Parse context to extract the actual text to analyze and the instruction
-            input_text, question = parse_fn(context)
+            if self.task_name == "scieval":
+                # SciiEval is already converted to {"context": ..., "target": ...}.
+                # Keep the full prompt in question for ACE generation.
+                input_text, question = "", context
+                data_source = "scieval"
+            elif self.task_name == "livecodebench":
+                # LiveCodeBench converted data keeps the full problem statement in context
+                # and public test cases in target.
+                input_text, question = "", context
+                data_source = "livecodebench"
+            else:
+                # Parse context to extract the actual text to analyze and the instruction
+                input_text, question = parse_fn(context)
+                data_source = "finlora"
 
             processed_item = {
                 "context": input_text,  # The actual context text
@@ -115,7 +135,7 @@ class DataProcessor:
                 "others": {
                     "original_context": context,
                     "task": self.task_name,
-                    "data_source": "finlora"
+                    "data_source": data_source
                 }
             }
 
@@ -160,6 +180,97 @@ class DataProcessor:
         except Exception:
             return predicted == ground_truth
         return predicted == ground_truth
+
+    def _normalize_scieval_label(self, text: str) -> str:
+        if text is None:
+            return ""
+        s = str(text).strip().upper()
+        if not s:
+            return ""
+        if s in {"A", "B", "C", "D"}:
+            return s
+        match = re.search(r"\b([A-D])\b", s)
+        return match.group(1) if match else ""
+
+    def _scieval_answer_is_correct(self, predicted: str, ground_truth: str) -> bool:
+        """SciiEval multiple-choice correctness check (A/B/C/D)."""
+        gt = self._normalize_scieval_label(ground_truth)
+        if not gt:
+            return False
+
+        pred_candidates = [predicted, extract_answer(predicted)]
+        for cand in pred_candidates:
+            pred = self._normalize_scieval_label(cand)
+            if pred and pred == gt:
+                return True
+        return False
+
+    def _extract_code_block(self, text: str) -> str:
+        if not text:
+            return ""
+    
+        content = text.strip()
+    
+        if "\\n" in content:
+            try:
+                content = codecs.decode(content, 'unicode_escape')
+            except Exception:
+                pass
+        
+        match = re.search(r"```(?:python|py)?[\s\n]*(.*?)[\s\n]*```", content, re.DOTALL | re.IGNORECASE)
+        if match:
+            code = match.group(1).strip()
+        else:
+            code = content.strip().strip("'").strip('"')
+
+
+        if code.startswith("```"):
+            code = re.sub(r"^```(?:python|py)?", "", code).strip()
+
+        return code
+
+    def _run_code_on_test(self, generated_code: str, input_data: str) -> Tuple[bool, str]:
+        try:
+            process = subprocess.run(
+                ["python3", "-c", generated_code],
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if process.returncode != 0:
+                return False, process.stderr.strip()
+            return True, process.stdout.strip()
+        except Exception as e:
+            print(f"Exception:{Exception}+\n+Code:{generated_code}")
+            return False, str(e)
+
+    def _livecodebench_answer_is_correct(self, predicted: str, ground_truth: str) -> bool:
+        """
+        LiveCodeBench correctness check by executing generated Python code
+        against public test cases stored in ground_truth.
+        """
+        code = self._extract_code_block(predicted)
+        if not code:
+            return False
+
+        try:
+            tests = json.loads(ground_truth)
+        except Exception:
+            return False
+
+        if not isinstance(tests, list) or len(tests) == 0:
+            return False
+
+        for test in tests:
+            input_data = str(test.get("input", ""))
+            expected_output = str(test.get("output", "")).strip()
+            ok, actual_or_err = self._run_code_on_test(code, input_data)
+            if not ok:
+                return False
+            if actual_or_err.strip() != expected_output:
+                return False
+        return True
     
     
     def answer_is_correct(self, predicted: str, ground_truth: str) -> bool:
@@ -177,6 +288,10 @@ class DataProcessor:
             return self._finer_answer_is_correct(predicted, ground_truth)
         elif self.task_name == "formula":
             return self._formula_answer_is_correct(predicted, ground_truth)
+        elif self.task_name == "scieval":
+            return self._scieval_answer_is_correct(predicted, ground_truth)
+        elif self.task_name == "livecodebench":
+            return self._livecodebench_answer_is_correct(predicted, ground_truth)
         else:
             raise ValueError(f"Unknown task: {self.task_name}")
     
@@ -219,6 +334,37 @@ class DataProcessor:
 
         return accuracy
 
+    def _evaluate_scieval_accuracy(self, out: List[str], target: List[str]) -> tuple:
+        """SciiEval dataset specific accuracy evaluation"""
+        if len(out) != len(target):
+            raise ValueError("Input lists 'out' and 'target' must have the same length.")
+
+        correct_count = 0
+        for predicted, ground_truth in zip(out, target):
+            if self._scieval_answer_is_correct(predicted, ground_truth):
+                correct_count += 1
+
+        accuracy = 0.0
+        if len(out) > 0:
+            accuracy = correct_count / len(out)
+
+        return accuracy
+
+    def _evaluate_livecodebench_accuracy(self, out: List[str], target: List[str]) -> tuple:
+        """LiveCodeBench dataset specific accuracy evaluation"""
+        if len(out) != len(target):
+            raise ValueError("Input lists 'out' and 'target' must have the same length.")
+
+        correct_count = 0
+        for predicted, ground_truth in zip(out, target):
+            if self._livecodebench_answer_is_correct(predicted, ground_truth):
+                correct_count += 1
+
+        accuracy = 0.0
+        if len(out) > 0:
+            accuracy = correct_count / len(out)
+        return accuracy
+
     
     def evaluate_accuracy(self, out: List[str], target: List[str]) -> tuple:
         """
@@ -235,6 +381,10 @@ class DataProcessor:
             return self._evaluate_finer_accuracy(out, target)
         elif self.task_name == "formula":
             return self._evaluate_formula_accuracy(out, target)
+        elif self.task_name == "scieval":
+            return self._evaluate_scieval_accuracy(out, target)
+        elif self.task_name == "livecodebench":
+            return self._evaluate_livecodebench_accuracy(out, target)
         else:
             raise ValueError(f"Unknown task: {self.task_name}")
     

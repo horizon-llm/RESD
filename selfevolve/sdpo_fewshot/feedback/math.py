@@ -149,7 +149,7 @@ def compute_score(
     pause_tokens_index: Optional[list[int]] = None,
     format_feedback: bool = True,
     correctness_feedback: bool = False,
-    **kwargs,
+    **kwargs
 ) -> float:
     """Compute the reward score for a solution.
 

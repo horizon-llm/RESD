@@ -8,5 +8,13 @@
         "train_data": "selfevolve/ace/data/formula_train_subset_500.jsonl",
         "val_data": "selfevolve/ace/data/formula_val_subset_300.jsonl",
         "test_data": "selfevolve/ace/data/formula_test.jsonl"
+    },
+    "scieval":{
+        "train_data":"selfevolve/ace/data/sci_train.jsonl",
+        "val_data":"selfevolve/ace/data/sci_val.jsonl"
+    },
+    "livecodebench":{
+        "train_data":"selfevolve/ace/data/lcb_train.jsonl",
+        "val_data":"selfevolve/ace/data/lcb_val.jsonl"
     }
 }
