@@ -68,7 +68,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-from ...context_updater import ACEContextUpdater
+from ...context_updater import ACEContextUpdater, PlaybookContextUpdater
 from ...context_updater.prompts import TEACHER_PROMPT as _DEFAULT_TEACHER_PROMPT
 from ...teacher import TeacherClient
 
@@ -338,10 +338,10 @@ class RayPPOTrainer:
             legacy_key="use_context_updater",
             default=False,
         )
-        self.context_updater = ACEContextUpdater(config) if self.use_context_updater else None
+        self.context_updater = PlaybookContextUpdater(config) if self.use_context_updater else None
         if self.use_context_updater:
             ctx_cfg = config.actor_rollout_ref.actor.get("self_distillation", {}).get("context_updater", None)
-            self.cu_teacher_prompt_template = ACEContextUpdater._resolve_prompt_template(
+            self.cu_teacher_prompt_template = PlaybookContextUpdater._resolve_prompt_template(
                 ctx_cfg, "cu_teacher_prompt_file", "cu_teacher_prompt_template", _DEFAULT_TEACHER_PROMPT,
             )
         else:
@@ -585,6 +585,25 @@ class RayPPOTrainer:
             import wandb
             if wandb.run is not None:
                 wandb.log({"playbook/text": wandb.Html(f"<pre>{playbook}</pre>")}, step=step)
+
+    def _log_playbook_summary(self, context_updater: "PlaybookContextUpdater", step: int):
+        """Log playbook summary stats for PlaybookContextUpdater (supports both modes)."""
+        stats = context_updater._aggregate_stats()
+        if "wandb" in self.config.trainer.logger:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({
+                    "playbook/num_playbooks": stats["num_playbooks"],
+                    "playbook/total_bullets": stats["total_bullets"],
+                    "playbook/avg_bullets": stats["avg_bullets"],
+                    "playbook/max_bullets_single": stats["max_bullets_single"],
+                    "playbook/high_performing": stats["high_performing"],
+                    "playbook/problematic": stats["problematic"],
+                    "playbook/unused": stats["unused"],
+                }, step=step)
+                # In global mode, also log the full playbook text
+                if context_updater.playbook_mode == "global":
+                    wandb.log({"playbook/text": wandb.Html(f"<pre>{context_updater.playbook}</pre>")}, step=step)
 
     def _log_teacher_prompt(self, messages: list, step: int, sample_idx: int = 0):
         """Log a sample teacher prompt to wandb under self_distillation/teacher_prompt."""
@@ -869,10 +888,14 @@ class RayPPOTrainer:
             num_valid = sum(1 for fb in teacher_feedback_list if fb is not None)
             print(f"[Teacher] Extracted {num_valid}/{batch_size} teacher feedbacks (step={self.global_steps})")
 
-        # --- ACE Context Update (only when use_context_updater is enabled) ---
+        # --- Context Update (only when use_context_updater is enabled) ---
         previous_trials = None
         reflection_list = None
         playbook_stats = None
+        # Extract stable example IDs for per-example playbook support
+        example_ids = None
+        if "extra_info" in batch.non_tensor_batch:
+            example_ids = [info["index"] for info in batch.non_tensor_batch["extra_info"]]
         if self.use_context_updater:
             print(f"[ACE] Updating model weights before context update (step={self.global_steps})...")
             self.checkpoint_manager.update_weights()
@@ -887,12 +910,16 @@ class RayPPOTrainer:
                     batch, self.async_rollout_manager, self.tokenizer, feedback_list,
                     teacher_feedback_list=teacher_feedback_list,
                     acc_list=acc_list,
+                    example_ids=example_ids,
                 )
             previous_trials = context_update_results.get("response_texts", None)
             reflection_list = context_update_results.get("reflection_texts", None)
             playbook_stats = context_update_results.get("final_stats", None)
             print(f"[ACE] Context update complete (step={self.global_steps}, took {_timing.get('context_update', 0):.1f}s).")
-            self._log_playbook(self.context_updater.playbook, self.global_steps)
+            if isinstance(self.context_updater, PlaybookContextUpdater):
+                self._log_playbook_summary(self.context_updater, self.global_steps)
+            else:
+                self._log_playbook(self.context_updater.playbook, self.global_steps)
 
             self.checkpoint_manager.sleep_replicas()
 
@@ -934,9 +961,15 @@ class RayPPOTrainer:
                     default=False,
                 )
             )
+            # Resolve playbook for this example
+            _example_playbook = ""
+            if self.use_context_updater and example_ids is not None:
+                _example_playbook = self.context_updater.get_playbook(example_ids[i])
+            elif self.use_context_updater and hasattr(self.context_updater, "playbook"):
+                _example_playbook = self.context_updater.playbook
             use_playbook = (
                 self.use_context_updater
-                and self.context_updater.playbook != self.context_updater.get_empty_playbook()
+                and _example_playbook != PlaybookContextUpdater.get_empty_playbook()
                 and _get_context_updater_cfg_value(
                     self_distillation_cfg,
                     nested_key="use_playbook_in_teacher_prompt",
@@ -954,9 +987,14 @@ class RayPPOTrainer:
                         successful_previous_attempt=solution_strs[i]
                     )
 
-                # build feedback section
+                # build feedback section, for context updater, you may choose to not include feedback in the teacher prompt even when env feedback is present, controlled by use_feedback_in_teacher_prompt
                 feedback_section = ""
-                if use_feedback:
+                if use_feedback and _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_feedback_in_teacher_prompt",
+                    legacy_key="use_feedback_in_teacher_prompt",
+                    default=False,
+                ):
                     feedback_section = self_distillation_cfg.feedback_template.format(
                         feedback_raw=feedback_list[i]
                     )
@@ -967,15 +1005,22 @@ class RayPPOTrainer:
                     teacher_feedback_section = self_distillation_cfg.teacher_feedback_template.format(
                         teacher_feedback_raw=teacher_feedback_list[i]
                     )
+                
+                use_previous_trial_in_teacher_prompt = _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_previous_trial_in_teacher_prompt",
+                    legacy_key="use_previous_trial_in_teacher_prompt",
+                    default=False,
+                ) and previous_trials is not None and previous_trials[i] is not None
 
                 if use_feedback or has_solution or use_reflection:
                     reprompt_text = self.cu_teacher_prompt_template.format(
                         prompt=prompt_texts[i],
-                        previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
+                        previous_trial=self._remove_thinking_trace(previous_trials[i]) if use_previous_trial_in_teacher_prompt else "",
                         feedback=feedback_section,
                         teacher_feedback=teacher_feedback_section,
                         reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
-                        playbook=self.context_updater.playbook if use_playbook else "",
+                        playbook=_example_playbook if use_playbook else "",
                     )
                 else:
                     reprompt_text = prompt_texts[i]
@@ -1077,11 +1122,19 @@ class RayPPOTrainer:
             legacy_key="use_playbook_in_teacher_prompt",
             default=False,
         )
-        playbook_used = [
-            self.use_context_updater
-            and self.context_updater.playbook != self.context_updater.get_empty_playbook()
-            and use_playbook_in_teacher_prompt
-        ] * batch_size
+        playbook_used = []
+        for i in range(batch_size):
+            if self.use_context_updater and example_ids is not None:
+                pb = self.context_updater.get_playbook(example_ids[i])
+            elif self.use_context_updater and hasattr(self.context_updater, "playbook"):
+                pb = self.context_updater.playbook
+            else:
+                pb = ""
+            playbook_used.append(
+                self.use_context_updater
+                and pb != PlaybookContextUpdater.get_empty_playbook()
+                and use_playbook_in_teacher_prompt
+            )
 
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
         self_distillation_mask = torch.tensor(

@@ -143,6 +143,9 @@ self_distillation:
     # Enable ACE context updater flow during self-distillation
     enabled: False
 
+    # Playbook mode: "global" (single shared playbook) or "per_example" (dedicated playbook per training example)
+    playbook_mode: global
+
     # How often to concise the playbook (in number of context updates)
     concise_frequency: 4
 
@@ -157,6 +160,12 @@ self_distillation:
 
     # Whether to include ACE playbook in TEACHER_PROMPT when context updater is enabled
     use_playbook_in_teacher_prompt: True
+
+    # Whether to include environment feedback in TEACHER_PROMPT when context updater is enabled
+    use_feedback_in_teacher_prompt: True
+
+    # Whether to include the student's previous trial in TEACHER_PROMPT when context updater is enabled
+    use_previous_trial_in_teacher_prompt: True
 
     # Custom reflector prompt template; null uses built-in default.
     # Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}
@@ -205,6 +214,9 @@ self_distillation:
   #   "student_low"   - keep low student entropy (confident student)
   #   "ratio"         - keep high (teacher_H / student_H)
   entropy_filter_criterion: diff
+
+  # Hard filter: only keep tokens where teacher_entropy > student_entropy. False disables.
+  entropy_gt_filter: False
 
   # Whether to enable position-wise weighting in self-distillation loss
   position_weighting_enabled: False

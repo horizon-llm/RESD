@@ -93,6 +93,7 @@ def parse_and_format(raw_data, task_name: str, num_data: int = None) -> dict:
     else:
         raise ValueError(f"Unknown task: {task_name}")
     
+    idx = 0
     for item in raw_data[:num_data] if num_data != -1 else raw_data:
         context = item.get('context', '')
         target = item.get('target', '')
@@ -101,6 +102,10 @@ def parse_and_format(raw_data, task_name: str, num_data: int = None) -> dict:
         input_text, question = parse_fn(context)
 
         prompt = FINER_PROMPT_TEMPLATE.format(context=input_text, question=question)
+        extra_info = {
+            "index": str(idx),
+        }
+        idx += 1
 
         processed_item = {
             "prompt": [{"role": "user", "content": prompt}],
@@ -115,7 +120,8 @@ def parse_and_format(raw_data, task_name: str, num_data: int = None) -> dict:
             "data_source": f"finer_{task_name}",
             "reward_model": {
                 "ground_truth": target
-            }
+            },
+            "extra_info": extra_info
         }
 
         processed_data.append(processed_item)

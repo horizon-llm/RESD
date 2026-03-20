@@ -130,11 +130,38 @@ def run_tests(dsl_code, test_cases):
             debug = ""
             if not passed:
                 debug_parts = []
-                if result.path:
+                is_infinite_loop = result.rejection_reason and "Maximum iterations" in result.rejection_reason
+                is_routed_none = result.rejection_reason and "Routed to NONE" in result.rejection_reason
+
+                if is_infinite_loop and result.path:
+                    # For infinite loops, show the stuck node info instead of useless repeated trace
+                    stuck_node_id = result.path[-1]
+                    node_type_str = ""
+                    if stuck_node_id in factory.nodes:
+                        node_type_str = factory.nodes[stuck_node_id].node_type.value
+                    front_char = result.final_tape[0] if result.final_tape else "EMPTY"
+                    debug_parts.append(f"Stuck at node: {stuck_node_id} ({node_type_str})")
+                    debug_parts.append(f"Front tape character: {front_char}")
+                    debug_parts.append(f"Remaining tape: '{result.final_tape}'")
+                elif is_routed_none and result.path and len(result.path) >= 2:
+                    # For routed-to-NONE, show which node and front char caused it
+                    routing_node_id = result.path[-2]
+                    node_type_str = ""
+                    if routing_node_id in factory.nodes:
+                        node_type_str = factory.nodes[routing_node_id].node_type.value
+                    front_char = result.final_tape[0] if result.final_tape else "EMPTY"
                     debug_parts.append("Execution Trace:")
                     debug_parts.append(_format_execution_trace(result.path))
-                if result.rejection_reason:
                     debug_parts.append(f"Rejection: {result.rejection_reason}")
+                    debug_parts.append(f"Routing node: {routing_node_id} ({node_type_str})")
+                    debug_parts.append(f"Front tape character at rejection: {front_char}")
+                else:
+                    if result.path:
+                        debug_parts.append("Execution Trace:")
+                        debug_parts.append(_format_execution_trace(result.path))
+                    if result.rejection_reason:
+                        debug_parts.append(f"Rejection: {result.rejection_reason}")
+
                 debug_parts.append(f"Finished: {result.finished}")
                 debug_parts.append(f"Actual output: '{result.final_tape}'")
                 if check_output:

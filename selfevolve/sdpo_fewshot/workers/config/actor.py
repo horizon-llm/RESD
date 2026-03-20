@@ -71,11 +71,16 @@ class ContextUpdaterConfig(BaseConfig):
 
     Args:
         enabled (bool): Whether to enable ACE context updater during self-distillation.
+        playbook_mode (str): Playbook strategy. Options:
+            - "global": single shared playbook across all examples (default, mirrors legacy ACE behavior).
+            - "per_example": each training example gets a dedicated playbook, keyed by extra_info["index"].
         concise_frequency (Optional[int]): Frequency (in context updates) to concise the playbook.
         max_bullets (Optional[int]): Maximum number of playbook bullets to keep; None disables bullet-count trigger.
         concise_method (str): Playbook concise strategy. Options: "reset", "prioritized".
         use_reflection_in_teacher_prompt (bool): Whether to include ACE reflection in teacher prompt.
         use_playbook_in_teacher_prompt (bool): Whether to include ACE playbook in teacher prompt.
+        use_feedback_in_teacher_prompt (bool): Whether to include environment feedback in teacher prompt.
+        use_previous_trial_in_teacher_prompt (bool): Whether to include the student's previous trial in teacher prompt.
         reflector_prompt_template (Optional[str]): Template for the reflector prompt.
             Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}.
             If null, uses the built-in default from prompts/ace_reflector.py.
@@ -94,11 +99,14 @@ class ContextUpdaterConfig(BaseConfig):
     """
 
     enabled: bool = False
+    playbook_mode: str = "global"
     concise_frequency: Optional[int] = 4
     max_bullets: Optional[int] = None
     concise_method: str = "reset"
     use_reflection_in_teacher_prompt: bool = True
     use_playbook_in_teacher_prompt: bool = True
+    use_feedback_in_teacher_prompt: bool = True
+    use_previous_trial_in_teacher_prompt: bool = True
     reflector_prompt_template: Optional[str] = None
     curator_prompt_template: Optional[str] = None
     reflector_prompt_file: Optional[str] = None
@@ -107,6 +115,12 @@ class ContextUpdaterConfig(BaseConfig):
     cu_teacher_prompt_file: Optional[str] = None
 
     def __post_init__(self):
+        valid_playbook_modes = ["global", "per_example"]
+        if self.playbook_mode not in valid_playbook_modes:
+            raise ValueError(
+                "self_distillation.context_updater.playbook_mode must be one of "
+                f"{valid_playbook_modes}, got {self.playbook_mode}"
+            )
         if self.concise_frequency is not None and self.concise_frequency <= 0:
             raise ValueError(
                 "self_distillation.context_updater.concise_frequency must be a positive integer when set, got "
@@ -203,6 +217,7 @@ class SelfDistillationConfig(BaseConfig):
     entropy_diff_filter_ratio: Optional[float] = None  # deprecated, use entropy_filter_ratio + entropy_filter_criterion
     entropy_filter_ratio: Optional[float] = None
     entropy_filter_criterion: str = "diff"
+    entropy_gt_filter: bool = False  # only keep tokens where teacher_entropy > student_entropy
     position_weighting_enabled: bool = False
     position_weighting_beta: float = 1.0
     remove_thinking_in_loss: bool = False

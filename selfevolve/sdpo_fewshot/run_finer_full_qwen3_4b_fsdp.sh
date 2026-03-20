@@ -54,7 +54,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-24576}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
@@ -73,13 +73,20 @@ position_weighting_beta=${position_weighting_beta:-1.0} # strength of position w
 entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] fraction of tokens to keep per sequence by (teacher_H - student_H); null disables
 entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
 entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
+entropy_gt_filter=${entropy_gt_filter:-False} # whether to apply hard filter where teacher_entropy > student_entropy
 # === context updater ===
 use_context_updater=${use_context_updater:-False}
+playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
+use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
+use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-True} # whether to include previous trial in the teacher prompt; only applies if use_context_updater is True
+reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
+curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
@@ -114,16 +121,23 @@ _add pwb     "$position_weighting_beta"    1.0
 _add edfr    "$entropy_diff_filter_ratio"  null
 _add efr     "$entropy_filter_ratio"      null
 _add efc     "$entropy_filter_criterion"  diff
+_add egf     "$entropy_gt_filter"         False
 _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
 _add ctxupd  "$use_context_updater"        False
+_add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
 _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
+_add ufbttp  "$use_feedback_in_teacher_prompt" True
+_add uprevttp "$use_previous_trial_in_teacher_prompt" True
+_add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
+_add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
+_add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 
@@ -216,15 +230,22 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.entropy_diff_filter_ratio=${entropy_diff_filter_ratio}
     actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
     actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
+    actor_rollout_ref.actor.self_distillation.entropy_gt_filter=${entropy_gt_filter}
 )
 
 CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.enabled=${use_context_updater}
+    actor_rollout_ref.actor.self_distillation.context_updater.playbook_mode=${playbook_mode}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
     actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
 )
 
 TEACHER=(

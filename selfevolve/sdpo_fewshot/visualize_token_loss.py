@@ -29,6 +29,7 @@ import torch
 FIELD_REGISTRY = {
     "token_distill_loss": {"label": "Distillation Loss (per token)", "cmap": "sequential"},
     "log_ratio": {"label": "Advantage log p_teacher/p_student", "cmap": "category"},
+    "entropy_category": {"label": "Entropy & Top-1 Category", "cmap": "category4", "renderer": "category"},
     "student_entropy": {"label": "Entropy (student)", "cmap": "sequential"},
     "teacher_entropy": {"label": "Entropy (teacher)", "cmap": "sequential"},
     "topk_log_ratio_dist": {"label": "Top-K Log Ratio Density", "cmap": "diverging", "renderer": "density"},
@@ -77,6 +78,28 @@ def _preprocess_dump(dump: dict) -> dict:
         dump["topk_log_ratio"] = dump["teacher_topk_logps"] - dump["student_topk_logps"]
         # Marker so this field shows up in get_default_fields
         dump["topk_log_ratio_dist"] = True
+    # Compute entropy category: 5 classes based on entropy comparison + top-1 match
+    # Category 4 = "tail": teacher's top-1 is likely outside the student's top-k
+    # (detected when the teacher's cumulative prob within student's top-k < 0.5)
+    if ("student_entropy" in dump and "teacher_entropy" in dump
+            and "student_topk_logps" in dump and "teacher_topk_logps" in dump
+            and "topk_indices" in dump):
+        s_top1 = dump["topk_indices"].gather(-1, dump["student_topk_logps"].argmax(dim=-1, keepdim=True)).squeeze(-1)
+        t_top1 = dump["topk_indices"].gather(-1, dump["teacher_topk_logps"].argmax(dim=-1, keepdim=True)).squeeze(-1)
+        top1_match = (s_top1 == t_top1)  # (bs, response_len)
+        teacher_higher = dump["teacher_entropy"] > dump["student_entropy"]  # (bs, response_len)
+        # Detect tail: teacher's probability mass within student's top-k is low
+        teacher_topk_probs = torch.exp(dump["teacher_topk_logps"])  # (bs, response_len, k)
+        teacher_topk_mass = teacher_topk_probs.sum(dim=-1)  # (bs, response_len)
+        is_tail = teacher_topk_mass < 0.5  # teacher's true top-1 likely outside student's top-k
+        # Categories: 0=T>S+match, 1=S>T+match, 2=T>S+nomatch, 3=S>T+nomatch, 4=tail
+        category = torch.zeros_like(dump["student_entropy"], dtype=torch.long)
+        category[teacher_higher & top1_match] = 0
+        category[~teacher_higher & top1_match] = 1
+        category[teacher_higher & ~top1_match] = 2
+        category[~teacher_higher & ~top1_match] = 3
+        category[is_tail] = 4  # override: tail takes precedence
+        dump["entropy_category"] = category
     return dump
 
 
@@ -95,6 +118,24 @@ def decode_tokens(token_ids: torch.Tensor, tokenizer) -> list[str]:
 
 # ── Color mapping ───────────────────────────────────────────────────────────
 
+CATEGORY_LABELS = [
+    "T_entropy > S_entropy, top-1 match",
+    "S_entropy > T_entropy, top-1 match",
+    "T_entropy > S_entropy, top-1 mismatch",
+    "S_entropy > T_entropy, top-1 mismatch",
+    "Tail (teacher top-1 outside top-k)",
+]
+CATEGORY_COLORS = [
+    "rgba(76,175,80,0.7)",    # 0: green — teacher more uncertain, but agree
+    "rgba(33,150,243,0.7)",   # 1: blue — student more uncertain, but agree
+    "rgba(255,152,0,0.7)",    # 2: orange — teacher more uncertain, disagree
+    "rgba(244,67,54,0.7)",    # 3: red — student more uncertain, disagree
+    "rgba(158,158,158,0.7)",  # 4: grey — tail dominated
+]
+CATEGORY_PIE_COLORS = ["#4CAF50", "#2196F3", "#FF9800", "#F44336", "#9E9E9E"]
+NUM_CATEGORIES = len(CATEGORY_LABELS)
+
+
 def value_to_color(value: float, vmin: float, vmax: float, cmap: str = "diverging") -> str:
     """Map a scalar value to an RGB color string.
 
@@ -104,6 +145,11 @@ def value_to_color(value: float, vmin: float, vmax: float, cmap: str = "divergin
     """
     if vmax == vmin:
         return "rgba(255,255,255,0)"
+
+    if cmap == "category4":
+        # 4 discrete categories with distinct colors
+        cat = int(value)
+        return CATEGORY_COLORS[cat]
 
     if cmap == "category":
         # Promotion (green, positive) vs Suppression (red, negative)
@@ -361,6 +407,127 @@ def _render_density_section(
     parts.append('</div></div>')
     return "\n".join(parts)
 
+
+
+def _svg_pie_chart(counts: list[int], labels: list[str], colors: list[str], size: int = 220) -> str:
+    """Render an SVG pie chart with legend."""
+    import math
+    total = sum(counts)
+    if total == 0:
+        return ""
+    cx, cy, r = size // 2, size // 2, size // 2 - 10
+    legend_w = 280
+    svg_w = size + legend_w + 20
+    parts = [
+        f'<svg width="{svg_w}" height="{max(size, len(labels) * 28 + 20)}" '
+        f'xmlns="http://www.w3.org/2000/svg" style="background:#12122a;border-radius:6px;">'
+    ]
+    start_angle = -math.pi / 2
+    for i, (cnt, label, color) in enumerate(zip(counts, labels, colors)):
+        if cnt == 0:
+            continue
+        frac = cnt / total
+        end_angle = start_angle + 2 * math.pi * frac
+        large_arc = 1 if frac > 0.5 else 0
+        x1, y1 = cx + r * math.cos(start_angle), cy + r * math.sin(start_angle)
+        x2, y2 = cx + r * math.cos(end_angle), cy + r * math.sin(end_angle)
+        if frac >= 1.0 - 1e-9:
+            # Full circle
+            parts.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}"/>')
+        else:
+            parts.append(
+                f'<path d="M{cx},{cy} L{x1:.2f},{y1:.2f} '
+                f'A{r},{r} 0 {large_arc},1 {x2:.2f},{y2:.2f} Z" fill="{color}"/>'
+            )
+        start_angle = end_angle
+
+    # Legend
+    lx = size + 15
+    for i, (cnt, label, color) in enumerate(zip(counts, labels, colors)):
+        ly = 20 + i * 28
+        pct = cnt / total * 100 if total > 0 else 0
+        parts.append(f'<rect x="{lx}" y="{ly}" width="14" height="14" rx="3" fill="{color}"/>')
+        parts.append(
+            f'<text x="{lx + 20}" y="{ly + 12}" fill="#ccc" font-size="11" '
+            f'font-family="monospace">{label}: {cnt} ({pct:.1f}%)</text>'
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _render_category_section(
+    sample_idx: int,
+    response_tokens: list[str],
+    categories: torch.Tensor,
+    mask: torch.Tensor,
+    prompt_tokens: list[str],
+    teacher_prompt_tokens: list[str] | None = None,
+) -> str:
+    """Render a sample with tokens colored by entropy category + pie chart."""
+    parts = [f'<div class="sample">', f'<h3>Sample {sample_idx}</h3>']
+
+    # Count categories (only for masked/valid tokens)
+    valid_cats = categories[mask.bool()]
+    counts = [(valid_cats == c).sum().item() for c in range(NUM_CATEGORIES)]
+    total = sum(counts)
+    stats_parts = [f"<b>Entropy & Top-1 Category</b>: num_tokens={total}"]
+    for c in range(NUM_CATEGORIES):
+        pct = counts[c] / total * 100 if total > 0 else 0
+        stats_parts.append(f", {CATEGORY_LABELS[c]}={counts[c]} ({pct:.1f}%)")
+    parts.append(f'<div class="stats">{"".join(stats_parts)}</div>')
+
+    # Prompt sections
+    student_label = "STUDENT PROMPT" if teacher_prompt_tokens is not None else "PROMPT"
+    prompt_text = "".join(html.escape(tok) for tok in prompt_tokens)
+    parts.append(
+        f'<details class="prompt-section">'
+        f'<summary class="section-label">{student_label} ({len(prompt_tokens)} tokens)</summary>'
+        f'<div class="text-block"><span class="prompt">{prompt_text}</span></div>'
+        f'</details>'
+    )
+    if teacher_prompt_tokens is not None:
+        teacher_text = "".join(html.escape(tok) for tok in teacher_prompt_tokens)
+        parts.append(
+            f'<details class="prompt-section">'
+            f'<summary class="section-label">TEACHER PROMPT ({len(teacher_prompt_tokens)} tokens)</summary>'
+            f'<div class="text-block"><span class="prompt">{teacher_text}</span></div>'
+            f'</details>'
+        )
+
+    # Response tokens colored by category
+    parts.append('<div class="text-block">')
+    parts.append('<span class="section-label">RESPONSE</span> ')
+    token_spans = []
+    for i, tok in enumerate(response_tokens):
+        if mask[i].item() == 0:
+            token_spans.append(f'<span class="masked-token">{html.escape(tok)}</span>')
+        else:
+            cat = categories[i].item()
+            color = CATEGORY_COLORS[cat]
+            title = CATEGORY_LABELS[cat]
+            token_spans.append(
+                f'<span class="token" style="background-color:{color}" title="{title}">'
+                f'{html.escape(tok)}</span>'
+            )
+    parts.append("".join(token_spans))
+    parts.append("</div>")
+
+    # Pie chart
+    parts.append('<div class="dist-chart" style="margin-top:12px;">')
+    parts.append(_svg_pie_chart(counts, CATEGORY_LABELS, CATEGORY_PIE_COLORS))
+    parts.append("</div>")
+
+    # Category legend
+    parts.append('<div class="legend">')
+    for c in range(NUM_CATEGORIES):
+        parts.append(
+            f'<span class="legend-cell" style="background-color:{CATEGORY_COLORS[c]};color:#fff;">'
+            f'{CATEGORY_LABELS[c]}</span>'
+        )
+    parts.append("</div>")
+
+    parts.append("</div>")
+    return "\n".join(parts)
 
 
 # ── HTML template ───────────────────────────────────────────────────────────
@@ -643,6 +810,43 @@ def build_html(dump: dict, tokenizer, fields: list[str] | None = None, title: st
                 sample_ratios = topk_ratios[i, :content_end]
                 html_parts.append(_render_density_section(
                     i, sample_ratios, meta["label"],
+                ))
+            html_parts.append("</div>")
+            continue
+
+        # Category renderer (entropy + top-1 match)
+        if renderer == "category":
+            categories = dump[field]  # (n, response_len) int tensor
+            for i in range(n_samples):
+                prompt_ids = input_ids[i, :prompt_len]
+                resp_ids = response_ids[i]
+                content_end = _find_content_end(resp_ids, tokenizer)
+                resp_ids = resp_ids[:content_end]
+                sample_cats = categories[i, :content_end]
+                sample_mask = response_mask[i, :content_end]
+
+                if tokenizer.pad_token_id is not None:
+                    prompt_start = 0
+                    while prompt_start < len(prompt_ids) and prompt_ids[prompt_start].item() == tokenizer.pad_token_id:
+                        prompt_start += 1
+                    prompt_ids = prompt_ids[prompt_start:]
+
+                prompt_tokens = decode_tokens(prompt_ids, tokenizer)
+                resp_tokens = decode_tokens(resp_ids, tokenizer)
+
+                t_prompt_tokens = None
+                if teacher_input_ids is not None:
+                    t_prompt_ids = teacher_input_ids[i, :teacher_prompt_len]
+                    if tokenizer.pad_token_id is not None:
+                        t_start = 0
+                        while t_start < len(t_prompt_ids) and t_prompt_ids[t_start].item() == tokenizer.pad_token_id:
+                            t_start += 1
+                        t_prompt_ids = t_prompt_ids[t_start:]
+                    t_prompt_tokens = decode_tokens(t_prompt_ids, tokenizer)
+
+                html_parts.append(_render_category_section(
+                    i, resp_tokens, sample_cats, sample_mask,
+                    prompt_tokens, t_prompt_tokens,
                 ))
             html_parts.append("</div>")
             continue

@@ -1283,6 +1283,25 @@ def compute_self_distillation_loss(
         metrics["actor/entropy_filter_diff_mean"] = (((teacher_entropy - student_entropy) * response_mask).sum() / resp_denom).detach().item()
         metrics["actor/entropy_filter_kept_ratio"] = (loss_mask.sum() / resp_denom).detach().item()
 
+    # Hard filter: only keep tokens where teacher_entropy > student_entropy
+    entropy_gt_filter = getattr(self_distillation_config, 'entropy_gt_filter', False)
+    if entropy_gt_filter:
+        # Compute entropy if not already computed by the ratio filter above
+        if _effective_filter_ratio is None:
+            if student_topk_log_probs is not None and teacher_topk_log_probs is not None:
+                t_logp, s_logp = teacher_topk_log_probs, student_topk_log_probs
+            elif student_all_log_probs is not None and teacher_all_log_probs is not None:
+                t_logp, s_logp = teacher_all_log_probs, student_all_log_probs
+            else:
+                raise ValueError("entropy_gt_filter requires topk or full log probs to compute entropy.")
+            teacher_entropy = -(t_logp.exp() * t_logp).sum(-1)  # (bs, seq_len)
+            student_entropy = -(s_logp.exp() * s_logp).sum(-1)  # (bs, seq_len)
+
+        gt_mask = (teacher_entropy > student_entropy).float()
+        resp_denom = response_mask.sum().clamp(min=1.0)
+        metrics["actor/entropy_gt_filter_kept_ratio"] = ((gt_mask * response_mask).sum() / resp_denom).detach().item()
+        loss_mask = loss_mask * gt_mask
+
     is_clip = self_distillation_config.is_clip
     if is_clip is not None:
         if old_log_probs is None:
