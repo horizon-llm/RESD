@@ -997,7 +997,7 @@ class StreamRayPPOTrainer:
                 _example_playbook = self.context_updater.playbook
             use_playbook = (
                 self.use_context_updater
-                and _example_playbook != ACEContextUpdater.get_empty_playbook()
+                and _example_playbook != PlaybookContextUpdater.get_empty_playbook()
                 and _get_context_updater_cfg_value(
                     self_distillation_cfg,
                     nested_key="use_playbook_in_teacher_prompt",
@@ -1015,9 +1015,14 @@ class StreamRayPPOTrainer:
                         successful_previous_attempt=solution_strs[i]
                     )
 
-                # build env feedback section
+                # build feedback section, for context updater, you may choose to not include feedback in the teacher prompt even when env feedback is present, controlled by use_feedback_in_teacher_prompt
                 feedback_section = ""
-                if use_feedback:
+                if use_feedback and _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_feedback_in_teacher_prompt",
+                    legacy_key="use_feedback_in_teacher_prompt",
+                    default=False,
+                ):
                     feedback_section = self_distillation_cfg.feedback_template.format(
                         feedback_raw=feedback_list[i]
                     )
@@ -1029,16 +1034,34 @@ class StreamRayPPOTrainer:
                         teacher_feedback_raw=teacher_feedback_list[i]
                     )
 
-                if use_feedback or use_teacher_feedback or has_solution or use_reflection or use_playbook:
-                    reprompt_text = self.cu_teacher_prompt_template.format(
+                use_previous_trial_in_teacher_prompt = _get_context_updater_cfg_value(
+                    self_distillation_cfg,
+                    nested_key="use_previous_trial_in_teacher_prompt",
+                    legacy_key="use_previous_trial_in_teacher_prompt",
+                    default=False,
+                ) and previous_trials is not None and previous_trials[i] is not None
+
+                use_solution_in_teacher_prompt = (
+                    has_solution
+                    and _get_context_updater_cfg_value(
+                        self_distillation_cfg,
+                        nested_key="use_solution_in_teacher_prompt",
+                        default=False,
+                    )
+                )
+
+                if use_feedback or has_solution or use_reflection:
+                    format_kwargs = dict(
                         prompt=prompt_texts[i],
-                        previous_trial=self._remove_thinking_trace(previous_trials[i]) if previous_trials is not None else "",
-                        solution=solution_section,
+                        previous_trial=self._remove_thinking_trace(previous_trials[i]) if use_previous_trial_in_teacher_prompt else "",
                         feedback=feedback_section,
                         teacher_feedback=teacher_feedback_section,
                         reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
                         playbook=_example_playbook if use_playbook else "",
                     )
+                    if "{solution}" in self.cu_teacher_prompt_template:
+                        format_kwargs["solution"] = solution_section if use_solution_in_teacher_prompt else ""
+                    reprompt_text = self.cu_teacher_prompt_template.format(**format_kwargs)
                 else:
                     reprompt_text = prompt_texts[i]
             else:
@@ -1419,6 +1442,31 @@ class StreamRayPPOTrainer:
 
         return metric_dict
 
+    def _update_best_val(self, val_metrics: dict, step: int) -> dict:
+        """Track best validation performance so far.
+
+        Looks for val-core keys and updates the best seen value for each.
+        Returns a dict of best-val metrics to be logged.
+        """
+        if not hasattr(self, "_best_val"):
+            self._best_val: dict[str, tuple[float, int]] = {}
+
+        best_metrics: dict[str, float] = {}
+        for key, value in val_metrics.items():
+            if not key.startswith("val-core/"):
+                continue
+            prev_best, _ = self._best_val.get(key, (float("-inf"), -1))
+            if value >= prev_best:
+                self._best_val[key] = (value, step)
+            best_val, best_step = self._best_val[key]
+            best_key = key.replace("val-core/", "val-best/")
+            best_metrics[best_key] = best_val
+            best_metrics[best_key + "/step"] = best_step
+
+        if best_metrics:
+            pprint(f"[step {step}] Best validation so far: {best_metrics}")
+        return best_metrics
+
     def _merge_validation_results(self, result_a, result_b):
         if result_a is None and result_b is None:
             return {}
@@ -1716,12 +1764,15 @@ class StreamRayPPOTrainer:
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, step: int | None = None):
         from verl.utils.fs import local_mkdir_safe
 
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
+        if step is None:
+            step = self.global_steps
+
+        # path: given_path + `/global_step_{step}` + `/actor`
         local_global_step_folder = os.path.join(
-            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+            self.config.trainer.default_local_dir, f"global_step_{step}"
         )
 
         print(f"local_global_step_folder: {local_global_step_folder}")
@@ -1730,7 +1781,7 @@ class StreamRayPPOTrainer:
         actor_remote_path = (
             None
             if self.config.trainer.default_hdfs_dir is None
-            else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
+            else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{step}", "actor")
         )
 
         remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
@@ -1744,7 +1795,7 @@ class StreamRayPPOTrainer:
         )
 
         self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            actor_local_path, actor_remote_path, step, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
 
         # save dataloader
@@ -1775,7 +1826,7 @@ class StreamRayPPOTrainer:
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
-            f.write(str(self.global_steps))
+            f.write(str(step))
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -2073,6 +2124,8 @@ class StreamRayPPOTrainer:
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
+            best_val_metrics = self._update_best_val(val_metrics, step=self.global_steps)
+            val_metrics.update(best_val_metrics)
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
@@ -2599,6 +2652,8 @@ class StreamRayPPOTrainer:
             ):
                 with marked_timer("testing", timing_raw, color="green"):
                     val_metrics: dict = self._validate()
+                    best_val_metrics = self._update_best_val(val_metrics, step=last_inner_step)
+                    val_metrics.update(best_val_metrics)
                 metrics.update(val_metrics)
 
             # forget eval
@@ -2624,7 +2679,7 @@ class StreamRayPPOTrainer:
                 if esi_close_to_expiration:
                     print("Force saving checkpoint: ESI instance expiration approaching.")
                 with marked_timer("save_checkpoint", timing_raw, color="green"):
-                    self._save_checkpoint()
+                    self._save_checkpoint(step=last_inner_step)
 
             if is_last_batch:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):

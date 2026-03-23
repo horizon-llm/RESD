@@ -80,10 +80,13 @@ playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" mean
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
+tag_correct_samples=${tag_correct_samples:-False} # whether to run success tagging on correct samples to reinforce playbook bullet counts
+use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
 use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-True} # whether to include previous trial in the teacher prompt; only applies if use_context_updater is True
+use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
@@ -131,10 +134,13 @@ _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
 _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
+_add tagcor  "$tag_correct_samples"       False
+_add solbuf  "$use_solution_buffer"      False
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
 _add ufbttp  "$use_feedback_in_teacher_prompt" True
 _add uprevttp "$use_previous_trial_in_teacher_prompt" True
+_add usoltp  "$use_solution_in_teacher_prompt" False
 _add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
 _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
@@ -239,10 +245,13 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
+    actor_rollout_ref.actor.self_distillation.context_updater.tag_correct_samples=${tag_correct_samples}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_solution_buffer=${use_solution_buffer}
     actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
@@ -287,7 +296,7 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=4
+    trainer.save_freq=8
     trainer.test_freq=8
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"

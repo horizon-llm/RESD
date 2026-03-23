@@ -272,10 +272,30 @@ class PlaybookContextUpdater:
             __import__("selfevolve.sdpo_fewshot.context_updater.prompts", fromlist=["CURATOR_PROMPT"]).CURATOR_PROMPT,
         )
 
+        # Success tagging: run a lightweight reflector on correct samples to reinforce bullet counts
+        self.tag_correct_samples: bool = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="tag_correct_samples", legacy_key="tag_correct_samples", default=False,
+        )
+        if self.tag_correct_samples:
+            self.success_reflector_prompt_template = self._resolve_prompt_template(
+                ctx_cfg, "success_reflector_prompt_file", "success_reflector_prompt_template",
+                __import__("selfevolve.sdpo_fewshot.context_updater.prompts", fromlist=["SUCCESS_REFLECTOR_PROMPT"]).SUCCESS_REFLECTOR_PROMPT,
+            )
+            print(f"[PlaybookCU] Success tagging enabled — correct samples will reinforce bullet counts")
+
         # Playbook storage: Dict[playbook_key -> state_dict]
         self._playbooks: Dict[str, dict] = {}
         if self.playbook_mode == "global":
             self._playbooks[_GLOBAL_KEY] = self._make_fresh_state()
+
+        # Solution buffer: persist successful response texts across steps.
+        # Controlled by context_updater.use_solution_buffer (default: False).
+        self.use_solution_buffer: bool = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="use_solution_buffer", legacy_key="use_solution_buffer", default=False,
+        )
+        self._solution_buffer: Dict[str, str] = {}
+        if self.use_solution_buffer:
+            print(f"[PlaybookCU] Solution buffer enabled — successful trials will be cached across steps")
 
         print(f"[PlaybookCU] Initialized with playbook_mode={self.playbook_mode!r}")
     
@@ -334,6 +354,7 @@ class PlaybookContextUpdater:
             "playbook": PlaybookContextUpdater.get_empty_playbook(),
             "next_global_id": 1,
             "update_count": 0,
+            "bullet_last_used": {},  # bullet_id -> last step where it was tagged
         }
 
     def _get_or_create_state(self, key: str) -> dict:
@@ -345,6 +366,21 @@ class PlaybookContextUpdater:
         """Return the playbook string for a given example_id."""
         key = self.get_playbook_key(example_id)
         return self._get_or_create_state(key)["playbook"]
+
+    # ------------------------------------------------------------------
+    # Solution buffer
+    # ------------------------------------------------------------------
+
+    def store_solution(self, example_id: str, solution_text: str) -> None:
+        """Cache a successful response for *example_id* so future steps can use it."""
+        if self.use_solution_buffer:
+            self._solution_buffer[example_id] = solution_text
+
+    def get_buffered_solution(self, example_id: str) -> Optional[str]:
+        """Return a previously cached successful response, or None."""
+        if self.use_solution_buffer:
+            return self._solution_buffer.get(example_id, None)
+        return None
 
     # ------------------------------------------------------------------
     # Backward-compatible .playbook property (used in global mode)
@@ -365,10 +401,13 @@ class PlaybookContextUpdater:
     # ------------------------------------------------------------------
 
     def state_dict(self) -> dict:
-        return {
+        d = {
             "playbook_mode": self.playbook_mode,
             "playbooks": self._playbooks,
         }
+        if self.use_solution_buffer:
+            d["solution_buffer"] = self._solution_buffer
+        return d
 
     def load_state_dict(self, state_dict: dict):
         saved_mode = state_dict.get("playbook_mode", "global")
@@ -378,7 +417,16 @@ class PlaybookContextUpdater:
                 f"differs from current={self.playbook_mode!r}. Loading anyway."
             )
         self._playbooks = state_dict["playbooks"]
-        print(f"[PlaybookCU] Restored {len(self._playbooks)} playbook(s) from checkpoint.")
+        # Backfill bullet_last_used for old checkpoints that lack it
+        for state in self._playbooks.values():
+            if "bullet_last_used" not in state:
+                state["bullet_last_used"] = {}
+        if self.use_solution_buffer:
+            self._solution_buffer = state_dict.get("solution_buffer", {})
+            print(f"[PlaybookCU] Restored {len(self._playbooks)} playbook(s) and "
+                  f"{len(self._solution_buffer)} buffered solution(s) from checkpoint.")
+        else:
+            print(f"[PlaybookCU] Restored {len(self._playbooks)} playbook(s) from checkpoint.")
 
     # ------------------------------------------------------------------
     # Concising (per playbook key)
@@ -407,11 +455,41 @@ class PlaybookContextUpdater:
         print(f"[PlaybookCU] Concising playbook key={key!r} (reason: {', '.join(reasons)}, method={concise_method})...")
 
         effective_max = max_bullets if limit_trigger else None
-        state["playbook"] = self._concise_playbook(pb, effective_max, concise_method)
+        state["playbook"] = self._concise_playbook(
+            pb, effective_max, concise_method,
+            bullet_last_used=state.get("bullet_last_used", {}),
+            current_step=uc,
+        )
+        # Clean up bullet_last_used for removed bullets
+        remaining_ids = {
+            parsed["id"]
+            for line in state["playbook"].strip().split("\n")
+            if (parsed := parse_playbook_line(line))
+        }
+        state["bullet_last_used"] = {
+            bid: step for bid, step in state["bullet_last_used"].items() if bid in remaining_ids
+        }
 
     @staticmethod
-    def _concise_playbook(playbook: str, max_bullets: Optional[int], concise_method: str) -> str:
-        """Concise a playbook string — mirrors ACEContextUpdater._concise_playbook."""
+    def _concise_playbook(
+        playbook: str,
+        max_bullets: Optional[int],
+        concise_method: str,
+        bullet_last_used: Optional[Dict[str, int]] = None,
+        current_step: Optional[int] = None,
+    ) -> str:
+        """Concise a playbook string.
+
+        concise_method:
+          - "reset": wipe and return an empty playbook.
+          - "prioritized": remove unused and harmful bullets;
+            if still over max_bullets, randomly drop helpful ones.
+          - "staleness": remove all harmful and stale unused bullets first
+            (stale unused = unused for more than 1 step). If max_bullets is
+            set and still over the cap, remove the longest-unused
+            non-harmful bullets until satisfied. If max_bullets is not set,
+            just remove harmful + stale unused.
+        """
         if concise_method == "reset":
             return PlaybookContextUpdater.get_empty_playbook()
 
@@ -433,12 +511,36 @@ class PlaybookContextUpdater:
             else:
                 helpful_ids.append(bid)
 
-        ids_to_remove: set = unused_ids | harmful_ids
+        if concise_method == "staleness":
+            last_used = bullet_last_used or {}
+            step = current_step or 0
+            # Stale unused: unused for more than 1 step
+            stale_unused = {bid for bid in unused_ids if step - last_used.get(bid, 0) > 1}
+            ids_to_remove: set = harmful_ids | stale_unused
+            print(f"[PlaybookCU] Staleness concise: removing {len(harmful_ids)} harmful + "
+                  f"{len(stale_unused)} stale unused bullets")
 
-        if max_bullets is not None:
-            n_drop = max(0, len(helpful_ids) - max_bullets)
-            if n_drop > 0:
-                ids_to_remove |= set(random.sample(helpful_ids, n_drop))
+            if max_bullets is not None:
+                surviving_unused = [bid for bid in unused_ids if bid not in ids_to_remove]
+                total_remaining = len(helpful_ids) + len(surviving_unused)
+                n_over = total_remaining - max_bullets
+                if n_over > 0:
+                    all_remaining = helpful_ids + surviving_unused
+                    sorted_by_staleness = sorted(
+                        all_remaining,
+                        key=lambda bid: last_used.get(bid, 0),
+                    )
+                    ids_to_remove |= set(sorted_by_staleness[:n_over])
+                    print(f"[PlaybookCU] Staleness: additionally removing {min(n_over, len(sorted_by_staleness))} "
+                          f"longest-unused bullets to meet max_bullets={max_bullets}")
+        else:
+            # "prioritized" method
+            ids_to_remove = unused_ids | harmful_ids
+
+            if max_bullets is not None:
+                n_drop = max(0, len(helpful_ids) - max_bullets)
+                if n_drop > 0:
+                    ids_to_remove |= set(random.sample(helpful_ids, n_drop))
 
         new_lines = []
         prev_blank = False
@@ -517,19 +619,28 @@ class PlaybookContextUpdater:
         key = "raw_prompt_original" if "raw_prompt_original" in batch.non_tensor_batch else "raw_prompt"
         prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[key]]
 
-        # Determine incorrect samples
+        # Determine incorrect and correct samples
         if acc_list is not None:
             incorrect_indices = [i for i, acc in enumerate(acc_list) if acc < 1.0]
+            correct_indices = [i for i, acc in enumerate(acc_list) if acc >= 1.0]
         else:
             incorrect_indices = list(range(batch_size))
-        num_correct = batch_size - len(incorrect_indices)
-        print(f"[PlaybookCU] Skipping reflection on {num_correct}/{batch_size} correct samples")
+            correct_indices = []
+        num_correct = len(correct_indices)
+        print(f"[PlaybookCU] {num_correct}/{batch_size} correct samples"
+              f"{' (success tagging enabled)' if self.tag_correct_samples and num_correct > 0 else ''}")
 
         if not incorrect_indices:
+            # Run success tagging before returning if enabled
+            if self.tag_correct_samples and correct_indices:
+                self._run_success_tagging(
+                    correct_indices, prompt_texts, response_texts, playbook_keys,
+                    async_rollout_manager, tokenizer, max_prompt_length,
+                )
             for k in unique_keys:
                 self._playbooks[k]["update_count"] += 1
             final_stats = self._aggregate_stats(unique_keys)
-            print(f"[PlaybookCU] All samples correct, skipping context update")
+            print(f"[PlaybookCU] All samples correct, skipping error reflection")
             return {
                 "response_texts": response_texts,
                 "reflection_texts": [""] * batch_size,
@@ -594,7 +705,15 @@ class PlaybookContextUpdater:
 
         for pk, tag_lists in tags_by_key.items():
             for tags in tag_lists:
-                self._playbooks[pk]["playbook"] = update_bullet_counts(self._playbooks[pk]["playbook"], tags)
+                self._update_bullet_counts_and_staleness(pk, tags)
+
+        # ----- Success tagging pass (correct samples) -----
+        # Run before curator so that updated helpful counts are visible in {current_playbook}
+        if self.tag_correct_samples and correct_indices:
+            self._run_success_tagging(
+                correct_indices, prompt_texts, response_texts, playbook_keys,
+                async_rollout_manager, tokenizer, max_prompt_length,
+            )
 
         # ----- Curator pass -----
         curator_prompts = []
@@ -660,6 +779,11 @@ class PlaybookContextUpdater:
                 state["playbook"], state["next_global_id"] = apply_curator_operations(
                     state["playbook"], ops, state["next_global_id"]
                 )
+                # Record creation step for any newly added bullets
+                for line in state["playbook"].strip().split("\n"):
+                    parsed = parse_playbook_line(line)
+                    if parsed and parsed["id"] not in state["bullet_last_used"]:
+                        state["bullet_last_used"][parsed["id"]] = state["update_count"]
                 total_ops += len(ops)
 
         # Increment update counts for all active keys
@@ -685,6 +809,95 @@ class PlaybookContextUpdater:
             "reflection_texts": reflection_texts,
             "final_stats": final_stats,
         }
+
+    # ------------------------------------------------------------------
+    # Success tagging
+    # ------------------------------------------------------------------
+
+    def _run_success_tagging(
+        self,
+        correct_indices: List[int],
+        prompt_texts: List[str],
+        response_texts: List[str],
+        playbook_keys: List[str],
+        async_rollout_manager,
+        tokenizer,
+        max_prompt_length: int,
+    ):
+        """Run a lightweight reflector on correct samples to tag which bullets helped."""
+        cor_prompt_texts = [prompt_texts[i] for i in correct_indices]
+        cor_response_texts = [response_texts[i] for i in correct_indices]
+        cor_playbook_keys = [playbook_keys[i] for i in correct_indices]
+
+        success_prompts = []
+        for j, (prompt, response) in enumerate(zip(cor_prompt_texts, cor_response_texts)):
+            pb = self._playbooks[cor_playbook_keys[j]]["playbook"]
+            success_prompt = self.success_reflector_prompt_template.format(
+                prompt=prompt,
+                response=_remove_thinking_trace(response),
+                playbook=pb,
+            )
+            success_prompts.append(success_prompt)
+
+        num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
+        success_messages = np.array(
+            [[{"role": "user", "content": p}] for p in success_prompts], dtype=object
+        )
+        success_batch = DataProto.from_dict(non_tensors={"raw_prompt": success_messages})
+        success_batch.meta_info = {"validate": False}
+
+        _check_prompt_lengths(success_prompts, tokenizer, max_prompt_length, label="success reflector prompt")
+
+        success_batch_padded, pad_size = pad_dataproto_to_divisor(success_batch, num_workers)
+        num_correct = len(correct_indices)
+        print(f"[PlaybookCU] Running success tagging for {num_correct} correct samples...")
+        success_output_padded = async_rollout_manager.generate_sequences(success_batch_padded)
+        success_output = unpad_dataproto(success_output_padded, pad_size)
+
+        success_reflection_texts = [
+            tokenizer.decode(ids, skip_special_tokens=True) for ids in success_output.batch["responses"]
+        ]
+
+        # Extract bullet tags and update counts
+        success_bullet_tags = [_extract_bullet_tags(r, use_json_mode=True) for r in success_reflection_texts]
+        for reflection, tags in zip(success_reflection_texts, success_bullet_tags):
+            if random.random() < 1 / 8:
+                print(f"[PlaybookCU] Success tagging preview: {reflection}...")
+                print(f"[PlaybookCU] Success bullet tags: {tags}")
+
+        tags_by_key: Dict[str, list] = defaultdict(list)
+        for j, tags in enumerate(success_bullet_tags):
+            if tags:
+                tags_by_key[cor_playbook_keys[j]].append(tags)
+
+        total_tagged = 0
+        for pk, tag_lists in tags_by_key.items():
+            for tags in tag_lists:
+                self._update_bullet_counts_and_staleness(pk, tags)
+                total_tagged += len(tags)
+
+        print(f"[PlaybookCU] Success tagging complete: {total_tagged} bullet tags from {num_correct} correct samples")
+
+    # ------------------------------------------------------------------
+    # Bullet staleness tracking
+    # ------------------------------------------------------------------
+
+    def _update_bullet_counts_and_staleness(self, playbook_key: str, tags: list):
+        """Update bullet helpful/harmful counts and record last-used step."""
+        state = self._playbooks[playbook_key]
+        state["playbook"] = update_bullet_counts(state["playbook"], tags)
+        current_step = state["update_count"]
+        for tag in tags:
+            if isinstance(tag, dict):
+                bullet_id = tag.get("id") or tag.get("bullet", "")
+                tag_value = tag.get("tag", "neutral")
+                if bullet_id and tag_value in ("helpful", "harmful"):
+                    state["bullet_last_used"][bullet_id] = current_step
+
+    def _record_new_bullet(self, playbook_key: str, bullet_id: str):
+        """Record the creation step for a newly added bullet."""
+        state = self._playbooks[playbook_key]
+        state["bullet_last_used"][bullet_id] = state["update_count"]
 
     # ------------------------------------------------------------------
     # Helpers

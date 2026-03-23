@@ -155,6 +155,15 @@ self_distillation:
     # Playbook concise strategy: "reset" or "prioritized"
     concise_method: reset
 
+    # Whether to run a lightweight success reflector on correct samples to tag which
+    # playbook bullets contributed to success, reinforcing their helpful counts.
+    tag_correct_samples: false
+
+    # Whether to cache successful response texts across training steps.
+    # When batch_size=1 there are no in-batch peers; the buffer lets the trainer
+    # re-use a successful trial from a previous step as the demonstration.
+    use_solution_buffer: false
+
     # Whether to include ACE reflection in TEACHER_PROMPT when context updater is enabled
     use_reflection_in_teacher_prompt: True
 
@@ -167,10 +176,19 @@ self_distillation:
     # Whether to include the student's previous trial in TEACHER_PROMPT when context updater is enabled
     use_previous_trial_in_teacher_prompt: True
 
+    # Whether to include successful solutions in TEACHER_PROMPT when context updater is enabled
+    # Requires the template to contain a {solution} placeholder
+    use_solution_in_teacher_prompt: False
+
     # Custom reflector prompt template; null uses built-in default.
     # Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}
     # NOTE: Use double braces {{ }} for literal braces in JSON examples within the prompt.
     reflector_prompt_template: null
+
+    # Custom success reflector prompt template; null uses built-in default.
+    # Available variables: {prompt}, {response}, {playbook}
+    # NOTE: Use double braces {{ }} for literal braces in JSON examples within the prompt.
+    success_reflector_prompt_template: null
 
     # Custom curator prompt template; null uses built-in default.
     # Available variables: {playbook_stats}, {recent_reflection}, {current_playbook}, {prompt}
@@ -180,6 +198,10 @@ self_distillation:
     # Path to a text file containing the reflector prompt template.
     # Takes precedence over reflector_prompt_template. null uses reflector_prompt_template.
     reflector_prompt_file: null
+
+    # Path to a text file containing the success reflector prompt template.
+    # Takes precedence over success_reflector_prompt_template.
+    success_reflector_prompt_file: null
 
     # Path to a text file containing the curator prompt template.
     # Takes precedence over curator_prompt_template. null uses curator_prompt_template.

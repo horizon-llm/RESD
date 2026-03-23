@@ -749,12 +749,18 @@ class RayPPOTrainer:
         response_texts: list[str],
         dont_reprompt_on_self_success: bool = False,
         remove_thinking_from_demonstration: bool = False,
+        buffered_solution: Optional[str] = None,
     ) -> Optional[str]:
         uid = uids[idx]
         solution_idxs = success_by_uid[uid]
         if dont_reprompt_on_self_success:
             solution_idxs = [j for j in solution_idxs if j != idx]
         if len(solution_idxs) == 0:
+            # Fall back to buffered solution from a previous step
+            if buffered_solution is not None:
+                if remove_thinking_from_demonstration:
+                    buffered_solution = self._remove_thinking_trace(buffered_solution)
+                return buffered_solution
             return None
         solution_idx = solution_idxs[0]  # taking the first successful demonstration effectively selects a random one
         solution_str = response_texts[solution_idx]
@@ -924,6 +930,15 @@ class RayPPOTrainer:
             self.checkpoint_manager.sleep_replicas()
 
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
+
+        # Store successful trials into the solution buffer (context updater path only).
+        # Store raw text — thinking trace removal is handled downstream by _get_solution.
+        if self.use_context_updater and self.context_updater is not None and example_ids is not None:
+            for uid, idxs in success_by_uid.items():
+                if idxs:
+                    eid = example_ids[idxs[0]]
+                    self.context_updater.store_solution(eid, response_texts[idxs[0]])
+
         solution_strs = [
             self._get_solution(
                 i,
@@ -932,6 +947,11 @@ class RayPPOTrainer:
                 response_texts,
                 self_distillation_cfg.dont_reprompt_on_self_success,
                 self_distillation_cfg.get("remove_thinking_from_demonstration", False),
+                buffered_solution=(
+                    self.context_updater.get_buffered_solution(example_ids[i])
+                    if self.use_context_updater and self.context_updater is not None and example_ids is not None
+                    else None
+                ),
             )
             for i in range(batch_size)
         ]
@@ -1013,8 +1033,18 @@ class RayPPOTrainer:
                     default=False,
                 ) and previous_trials is not None and previous_trials[i] is not None
 
+                use_solution_in_teacher_prompt = (
+                    has_solution
+                    and _get_context_updater_cfg_value(
+                        self_distillation_cfg,
+                        nested_key="use_solution_in_teacher_prompt",
+                        legacy_key="use_solution_in_teacher_prompt",
+                        default=False,
+                    )
+                )
+
                 if use_feedback or has_solution or use_reflection:
-                    reprompt_text = self.cu_teacher_prompt_template.format(
+                    format_kwargs = dict(
                         prompt=prompt_texts[i],
                         previous_trial=self._remove_thinking_trace(previous_trials[i]) if use_previous_trial_in_teacher_prompt else "",
                         feedback=feedback_section,
@@ -1022,6 +1052,9 @@ class RayPPOTrainer:
                         reflection=self._remove_thinking_trace(reflection_list[i]) if use_reflection else "",
                         playbook=_example_playbook if use_playbook else "",
                     )
+                    if "{solution}" in self.cu_teacher_prompt_template:
+                        format_kwargs["solution"] = solution_section if use_solution_in_teacher_prompt else ""
+                    reprompt_text = self.cu_teacher_prompt_template.format(**format_kwargs)
                 else:
                     reprompt_text = prompt_texts[i]
             else:
@@ -1137,6 +1170,7 @@ class RayPPOTrainer:
             )
 
         # self_distillation_mask is True if sample has a solution OR feedback is used (i.e., will get a reprompted message)
+        # a correct sample is always masked because the solution string is none
         self_distillation_mask = torch.tensor(
             [
                 solution_strs[i] is not None or feedback_used[i] or teacher_feedback_used[i] or reflection_used[i]

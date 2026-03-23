@@ -35,3 +35,24 @@ TEACHER_PROMPT = """You are an analysis expert tasked with answering questions u
 
 **Please Correctly Respond to the Prompt Using the Above Information**:
 """
+
+
+STUDENT_PROMPT = """You are an analysis expert tasked with answering questions using your knowledge and a curated playbook of strategies and insights.
+
+**Instructions:**
+- Read the playbook carefully and apply relevant strategies, formulas, and insights
+- Pay attention to common mistakes listed in the playbook and avoid them
+- Show your reasoning step-by-step
+- Be concise but thorough in your analysis
+- If the playbook contains relevant code snippets or formulas, use them appropriately
+- Double-check your calculations and logic before providing the final answer
+
+
+**Playbook:**
+{playbook}
+
+**Prompt:**
+{prompt}
+
+**Please Respond to the Prompt Using the Above Information**:
+"""

@@ -13,42 +13,46 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
+# export RAY_DEBUG="legacy"
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
-########################### Data Preprocess ###########################
+########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
-    --train_data_source manufactoria/has_train \
-    --test_data_source manufactoria/has_test \
-    --num_data ${NUM_DATA} \
-    --data_source_suffix "has"
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
+        --task_name finer \
+        --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
+        --num_data $NUM_DATA \
+        --output data/finer/train_${NUM_DATA}.parquet
+python selfevolve/sdpo_fewshot/prepare_finer_dataset.py \
+        --task_name finer \
+        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
+        --output data/finer/val.parquet
 
-train_path=selfevolve/sdpo/datasets/manufactoria/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/manufactoria/test.parquet
+train_path=data/finer/train_${NUM_DATA}.parquet
+val_path=data/finer/val.parquet
 
 ########################### Quick Config ###########################
 
-TASK=manufactoria
+TASK=finer
 export TASK
 
 # === optim ===
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
-ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
 LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
 # === model ===
-EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
+EMA_WEIGHT=${EMA_WEIGHT:-0.05} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
 ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
@@ -86,14 +90,16 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/manufactoria_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
-# === reward function ===
-sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
+# === stream trainer ===
+max_updates_per_batch=${max_updates_per_batch:-8}
+min_updates_per_batch=${min_updates_per_batch:-8}
+early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.01}
 
-project_name='sdpo_manufactoria'
+project_name='sdpo_stream_finer'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -105,8 +111,8 @@ _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
-_add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        49152
+_add maxlen  "$MAX_RESPONSE_LENGTH"        16384
+_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -145,7 +151,9 @@ _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
-_add sparse  "$sparse_rewards"             False
+_add mupb    "$max_updates_per_batch"      4
+_add minupb  "$min_updates_per_batch"      1
+_add esith   "$early_stop_improvement_threshold" 0.01
 
 ########################### Sync Results ###########################
 
@@ -195,9 +203,9 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/manufactoria.py
-    custom_reward_function.name=compute_score
-    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
+    custom_reward_function.name=compute_score_count
+    +custom_reward_function.reward_kwargs.correctness_feedback=True
 )
 
 MODEL=(
@@ -212,7 +220,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=65536
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -271,7 +279,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=69632
+    actor_rollout_ref.rollout.max_model_len=65536
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
@@ -289,15 +297,20 @@ ALGORITHM=(
 )
 
 TRAINER=(
+    trainer.use_stream_trainer=True
+    trainer.max_updates_per_batch=${max_updates_per_batch}
+    trainer.min_updates_per_batch=${min_updates_per_batch}
+    trainer.early_stop_improvement_threshold=${early_stop_improvement_threshold}
     trainer.logger='["console","wandb"]'
-    trainer.total_epochs=${NUM_EPOCHS}
+    trainer.total_epochs=1
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=8
-    trainer.test_freq=8
+    trainer.save_freq=1
+    trainer.test_freq=1
+    trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"

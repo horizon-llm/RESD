@@ -81,14 +81,24 @@ class ContextUpdaterConfig(BaseConfig):
         use_playbook_in_teacher_prompt (bool): Whether to include ACE playbook in teacher prompt.
         use_feedback_in_teacher_prompt (bool): Whether to include environment feedback in teacher prompt.
         use_previous_trial_in_teacher_prompt (bool): Whether to include the student's previous trial in teacher prompt.
+        use_solution_in_teacher_prompt (bool): Whether to include successful solutions in teacher prompt.
+            Requires the template to contain a {solution} placeholder. Default False.
+        tag_correct_samples (bool): Whether to run a lightweight success reflector on correct samples
+            to tag which playbook bullets contributed to success, reinforcing their helpful counts.
+            Default False — only incorrect samples update bullet counts.
         reflector_prompt_template (Optional[str]): Template for the reflector prompt.
             Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}.
+            If null, uses the built-in default from prompts/ace_reflector.py.
+        success_reflector_prompt_template (Optional[str]): Template for the success reflector prompt.
+            Available variables: {prompt}, {response}, {playbook}.
             If null, uses the built-in default from prompts/ace_reflector.py.
         curator_prompt_template (Optional[str]): Template for the curator prompt.
             Available variables: {playbook_stats}, {recent_reflection}, {current_playbook}, {prompt}.
             If null, uses the built-in default from prompts/ace_curator.py.
         reflector_prompt_file (Optional[str]): Path to a text file containing the reflector prompt template.
             Takes precedence over reflector_prompt_template. If null, falls back to reflector_prompt_template.
+        success_reflector_prompt_file (Optional[str]): Path to a text file containing the success reflector
+            prompt template. Takes precedence over success_reflector_prompt_template.
         curator_prompt_file (Optional[str]): Path to a text file containing the curator prompt template.
             Takes precedence over curator_prompt_template. If null, falls back to curator_prompt_template.
         cu_teacher_prompt_template (Optional[str]): Template for the context-updater teacher (generator) prompt
@@ -96,6 +106,9 @@ class ContextUpdaterConfig(BaseConfig):
             {reflection}, {teacher_feedback}. If null, uses the built-in default from prompts/ace_generator.py.
         cu_teacher_prompt_file (Optional[str]): Path to a text file containing the context-updater teacher prompt
             template. Takes precedence over cu_teacher_prompt_template.
+        use_solution_buffer (bool): Whether to cache successful response texts across training steps.
+            When batch_size=1 there are no in-batch peers; the buffer lets the trainer re-use a
+            successful trial from a previous step as the demonstration. Default False.
     """
 
     enabled: bool = False
@@ -103,13 +116,18 @@ class ContextUpdaterConfig(BaseConfig):
     concise_frequency: Optional[int] = 4
     max_bullets: Optional[int] = None
     concise_method: str = "reset"
+    tag_correct_samples: bool = False
+    use_solution_buffer: bool = False
     use_reflection_in_teacher_prompt: bool = True
     use_playbook_in_teacher_prompt: bool = True
     use_feedback_in_teacher_prompt: bool = True
     use_previous_trial_in_teacher_prompt: bool = True
+    use_solution_in_teacher_prompt: bool = False
     reflector_prompt_template: Optional[str] = None
+    success_reflector_prompt_template: Optional[str] = None
     curator_prompt_template: Optional[str] = None
     reflector_prompt_file: Optional[str] = None
+    success_reflector_prompt_file: Optional[str] = None
     curator_prompt_file: Optional[str] = None
     cu_teacher_prompt_template: Optional[str] = None
     cu_teacher_prompt_file: Optional[str] = None

@@ -2,6 +2,39 @@
 Reflector prompts for ACE system.
 """
 
+# Success reflector prompt — lightweight tagger for correct samples
+SUCCESS_REFLECTOR_PROMPT = """You are an expert analyst. The model answered the following question correctly. Your job is to identify which playbook bulletpoints contributed to this success.
+
+**Instructions:**
+- The model's response is CORRECT — do not look for errors
+- Review the playbook bulletpoints that were available to the generator
+- For each bulletpoint, determine whether it was helpful, harmful, or neutral for producing the correct answer
+- A bulletpoint is "helpful" if the model's correct reasoning aligns with or benefited from the advice in that bullet
+- A bulletpoint is "harmful" if it could have led the model astray (but the model succeeded despite it)
+- A bulletpoint is "neutral" if it was irrelevant to this particular problem
+- Make sure that the bullet_id is correct and corresponds to the bulletpoint in the playbook
+
+**Model's Prompt:**
+{prompt}
+
+**Model's Response:**
+{response}
+
+**Playbook that's used by the generator to answer the question:**
+{playbook}
+
+**Answer in this exact JSON format:**
+{{
+  "reasoning": "[Brief analysis of which strategies the model used successfully]",
+  "bullet_tags": [
+    {{"id": "calc-00001", "tag": "helpful"}},
+    {{"id": "fin-00002", "tag": "neutral"}}
+  ]
+}}
+
+---
+"""
+
 # Enhanced Reflector prompt that outputs bullet tags
 REFLECTOR_PROMPT = """You are an expert analyst and educator. Your job is to diagnose why a model's reasoning went wrong by analyzing the environment feedback.
 

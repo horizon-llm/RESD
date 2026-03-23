@@ -13,13 +13,14 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
+# export RAY_DEBUG="legacy"
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
-########################### Data Preprocess ###########################
+########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
@@ -40,11 +41,10 @@ export TASK
 
 # === optim ===
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
-ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
 LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
@@ -90,10 +90,14 @@ cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/contex
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
+# === stream trainer ===
+max_updates_per_batch=${max_updates_per_batch:-8}
+min_updates_per_batch=${min_updates_per_batch:-8}
+early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_manufactoria'
+project_name='sdpo_stream_manufactoria'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -106,7 +110,7 @@ _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
 _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        49152
+_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -145,6 +149,9 @@ _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
+_add mupb    "$max_updates_per_batch"      4
+_add minupb  "$min_updates_per_batch"      1
+_add esith   "$early_stop_improvement_threshold" 0.0
 _add sparse  "$sparse_rewards"             False
 
 ########################### Sync Results ###########################
@@ -289,15 +296,20 @@ ALGORITHM=(
 )
 
 TRAINER=(
+    trainer.use_stream_trainer=True
+    trainer.max_updates_per_batch=${max_updates_per_batch}
+    trainer.min_updates_per_batch=${min_updates_per_batch}
+    trainer.early_stop_improvement_threshold=${early_stop_improvement_threshold}
     trainer.logger='["console","wandb"]'
-    trainer.total_epochs=${NUM_EPOCHS}
+    trainer.total_epochs=1
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=8
-    trainer.test_freq=8
+    trainer.save_freq=1
+    trainer.test_freq=1
+    trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"
