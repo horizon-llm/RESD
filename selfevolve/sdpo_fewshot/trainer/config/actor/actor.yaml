@@ -216,6 +216,22 @@ self_distillation:
     # Takes precedence over cu_teacher_prompt_template. null uses cu_teacher_prompt_template.
     cu_teacher_prompt_file: null
 
+    # Whether to inject the playbook into the student prompt during first rollout.
+    # The student receives a snapshot of the playbook that is synced at concise boundaries.
+    use_playbook_in_student_rollout: false
+
+    # How often (in context updates) to sync the playbook snapshot to the student.
+    # null defaults to concise_frequency.
+    student_playbook_sync_frequency: null
+
+    # Custom student prompt template; null uses built-in STUDENT_PROMPT from ace_generator.py.
+    # Available variables: {playbook}, {prompt}
+    student_prompt_template: null
+
+    # Path to a text file containing the student prompt template.
+    # Takes precedence over student_prompt_template.
+    student_prompt_file: null
+
   # Clamp teacher prob to be at least this proportion of student prob; null disables
   teacher_prob_min_ratio: null
 

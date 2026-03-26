@@ -58,11 +58,17 @@ def finer_tag_score(predicted, ground_truth):
     score = count / len(pred) if pred else 0
     return score
 
-def compute_score(solution_str, ground_truth, format_score=0.0, score=1.0, **kwargs):
+def compute_score(
+    solution_str,
+    ground_truth,
+    format_score=0.0,
+    score=1.0,
+    extra_info=None,
+    **kwargs,
+):
     """Reward function for FiNER XBRL tagging task.
 
-    Supports partial credit: if the model gets 3 out of 4 tags right,
-    score is 0.75 * score.
+    No partial credit: model gets full score only if all tags are correct.
 
     Args:
         solution_str: the model's full output text
@@ -81,15 +87,42 @@ def compute_score(solution_str, ground_truth, format_score=0.0, score=1.0, **kwa
         else:
             print("Extracted answer: None!")
         print(f"Solution string: {solution_str}")
+    
+    was_truncated = extra_info.get("truncated", False) if extra_info else False
+    incorrect_format = answer is None
 
     if answer is None:
-        return 0
+        return {
+            "score": 0,
+            "acc": 0,
+            "pred": "",
+            "incorrect_format": 1,
+            "truncated": 1 if was_truncated else 0,
+            "truncated_and_missing_answer": 1 if incorrect_format and was_truncated else 0,
+            "feedback": "Your answer had the wrong format. The solution must be given in the format: <answer>your_answer</answer>."
+        }
     else:
         tag_score = finer_tag_score(answer, ground_truth)
         if tag_score == 1.0:
-            return score
+            return {
+                "score": score,
+                "acc": 1,
+                "pred": answer,
+                "incorrect_format": 0,
+                "truncated": 1 if was_truncated else 0,
+                "truncated_and_missing_answer": 1 if incorrect_format and was_truncated else 0,
+                "feedback": ""
+            }
         else:
-            return format_score
+            return {
+                "score": format_score,
+                "acc": 0,
+                "pred": answer,
+                "incorrect_format": 0,
+                "truncated": 1 if was_truncated else 0,
+                "truncated_and_missing_answer": 1 if incorrect_format and was_truncated else 0,
+                "feedback": "Your answer is incorrect. The correct answer is {ground_truth}."
+            }
 
 def compute_score_count(
     solution_str,

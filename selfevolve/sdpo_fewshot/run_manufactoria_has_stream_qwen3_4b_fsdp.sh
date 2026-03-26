@@ -87,6 +87,9 @@ use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whethe
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/manufactoria_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
+student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
+student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
@@ -147,6 +150,9 @@ _add usoltp  "$use_solution_in_teacher_prompt" False
 _add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
 _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
+_add sturollpb "$use_playbook_in_student_rollout" False
+_add stusync "$student_playbook_sync_frequency"  null
+_add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
@@ -262,6 +268,9 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_student_rollout=${use_playbook_in_student_rollout}
+    actor_rollout_ref.actor.self_distillation.context_updater.student_playbook_sync_frequency=${student_playbook_sync_frequency}
+    actor_rollout_ref.actor.self_distillation.context_updater.student_prompt_file=${student_prompt_file}
 )
 
 TEACHER=(

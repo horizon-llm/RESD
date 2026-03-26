@@ -70,6 +70,7 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 from ...context_updater import ACEContextUpdater, PlaybookContextUpdater
 from ...context_updater.prompts import TEACHER_PROMPT as _DEFAULT_TEACHER_PROMPT
+from ...context_updater.prompts import STUDENT_PROMPT as _DEFAULT_STUDENT_PROMPT
 from ...teacher import TeacherClient
 
 
@@ -344,8 +345,18 @@ class RayPPOTrainer:
             self.cu_teacher_prompt_template = PlaybookContextUpdater._resolve_prompt_template(
                 ctx_cfg, "cu_teacher_prompt_file", "cu_teacher_prompt_template", _DEFAULT_TEACHER_PROMPT,
             )
+            # Student rollout playbook: inject playbook snapshot into student prompt
+            self.use_playbook_in_student_rollout = _get_context_updater_cfg_value(
+                sd_cfg, nested_key="use_playbook_in_student_rollout",
+                legacy_key="use_playbook_in_student_rollout", default=False,
+            )
+            self.student_prompt_template = PlaybookContextUpdater._resolve_prompt_template(
+                ctx_cfg, "student_prompt_file", "student_prompt_template", _DEFAULT_STUDENT_PROMPT,
+            )
         else:
             self.cu_teacher_prompt_template = _DEFAULT_TEACHER_PROMPT
+            self.use_playbook_in_student_rollout = False
+            self.student_prompt_template = _DEFAULT_STUDENT_PROMPT
 
         _teacher_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("teacher", None)
         if _teacher_cfg and _teacher_cfg.get("enabled", False):
@@ -874,7 +885,9 @@ class RayPPOTrainer:
         response_mask = batch.batch["response_mask"]
         responses = batch.batch["responses"]
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch["raw_prompt"]]
+        # Use original (pre-playbook-injection) raw_prompt for teacher/reflection prompts
+        _raw_key = "original_raw_prompt" if "original_raw_prompt" in batch.non_tensor_batch else "raw_prompt"
+        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[_raw_key]]
         batch_size = batch.batch.batch_size[0]
 
         # Extract feedback if available and include_environment_feedback is enabled
@@ -929,6 +942,13 @@ class RayPPOTrainer:
 
             self.checkpoint_manager.sleep_replicas()
 
+            # Sync student playbook snapshot after context update if sync frequency is met
+            if (self.use_playbook_in_student_rollout
+                    and isinstance(self.context_updater, PlaybookContextUpdater)
+                    and self.context_updater.should_sync_student()):
+                self.context_updater.sync_student_playbooks()
+                print(f"[ACE] Synced student playbook (step={self.global_steps})")
+
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
 
         # Store successful trials into the solution buffer (context updater path only).
@@ -957,7 +977,7 @@ class RayPPOTrainer:
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = batch.non_tensor_batch["raw_prompt"][i][:-1]
+            system_messages = batch.non_tensor_batch[_raw_key][i][:-1]
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             has_teacher_feedback = teacher_feedback_list[i] is not None
@@ -1253,6 +1273,65 @@ class RayPPOTrainer:
             gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
+
+    def _inject_playbook_into_batch(self, batch: DataProto) -> None:
+        """Inject the student playbook snapshot into batch prompts before generation.
+
+        Modifies raw_prompt in-place. Tokenization happens downstream in generate_sequences
+        (via agent loop's apply_chat_template). Stores the original raw_prompt as
+        'original_raw_prompt' for teacher/reflection prompt construction.
+        """
+        if not self.use_playbook_in_student_rollout:
+            return
+        if not self.use_context_updater or self.context_updater is None:
+            return
+        if "raw_prompt" not in batch.non_tensor_batch:
+            return
+
+        # Extract example IDs for per-example playbook lookup
+        example_ids = None
+        if "extra_info" in batch.non_tensor_batch:
+            example_ids = [info["index"] for info in batch.non_tensor_batch["extra_info"]]
+
+        raw_prompts = batch.non_tensor_batch["raw_prompt"]
+        batch_size = len(raw_prompts)
+
+        # Collect playbooks and check if any are non-empty
+        empty_pb = PlaybookContextUpdater.get_empty_playbook()
+        playbooks = []
+        any_playbook = False
+        for i in range(batch_size):
+            eid = example_ids[i] if example_ids is not None else "__global__"
+            pb = self.context_updater.get_student_playbook(eid)
+            playbooks.append(pb)
+            if pb != empty_pb:
+                any_playbook = True
+
+        if not any_playbook:
+            return  # All playbooks empty, skip injection
+
+        # Save original raw_prompt for teacher/reflection prompt construction
+        batch.non_tensor_batch["original_raw_prompt"] = raw_prompts.copy()
+
+        # Build new messages with playbook injected via student prompt template
+        new_messages = []
+        for i in range(batch_size):
+            system_messages = raw_prompts[i][:-1]
+            original_prompt_text = raw_prompts[i][-1]["content"]
+
+            if playbooks[i] != empty_pb:
+                student_text = self.student_prompt_template.format(
+                    playbook=playbooks[i], prompt=original_prompt_text,
+                )
+            else:
+                student_text = original_prompt_text
+
+            new_messages.append(system_messages + [{"role": "user", "content": student_text}])
+
+        batch.non_tensor_batch["raw_prompt"] = np.array(new_messages, dtype=object)
+
+        n_injected = sum(1 for pb in playbooks if pb != empty_pb)
+        print(f"[StudentPlaybook] Injected playbook into {n_injected}/{batch_size} samples")
 
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
@@ -2147,6 +2226,9 @@ class RayPPOTrainer:
                 batch.non_tensor_batch["uid"] = np.array(
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
+
+                # Inject student playbook into prompts before generation
+                self._inject_playbook_into_batch(batch)
 
                 gen_batch = self._get_gen_batch(batch)
 

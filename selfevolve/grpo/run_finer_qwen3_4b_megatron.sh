@@ -99,7 +99,7 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.actor.ppo_mini_batch_size=16
+    actor_rollout_ref.actor.ppo_mini_batch_size=32
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False

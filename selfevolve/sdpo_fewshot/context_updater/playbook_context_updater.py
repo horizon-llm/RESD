@@ -297,6 +297,22 @@ class PlaybookContextUpdater:
         if self.use_solution_buffer:
             print(f"[PlaybookCU] Solution buffer enabled — successful trials will be cached across steps")
 
+        # Student playbook snapshot: a frozen copy synced at concise boundaries.
+        self.use_playbook_in_student_rollout: bool = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="use_playbook_in_student_rollout",
+            legacy_key="use_playbook_in_student_rollout", default=False,
+        )
+        self._student_playbooks: Dict[str, str] = {}
+        concise_freq = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="concise_frequency", legacy_key="concise_frequency", default=4,
+        )
+        self._student_sync_frequency: int = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="student_playbook_sync_frequency",
+            legacy_key="student_playbook_sync_frequency", default=None,
+        ) or concise_freq or 4
+        if self.use_playbook_in_student_rollout:
+            print(f"[PlaybookCU] Student rollout playbook enabled — sync every {self._student_sync_frequency} updates")
+
         print(f"[PlaybookCU] Initialized with playbook_mode={self.playbook_mode!r}")
     
     @staticmethod
@@ -368,6 +384,39 @@ class PlaybookContextUpdater:
         return self._get_or_create_state(key)["playbook"]
 
     # ------------------------------------------------------------------
+    # Student playbook snapshot
+    # ------------------------------------------------------------------
+
+    def get_student_playbook(self, example_id: str) -> str:
+        """Return the student playbook snapshot for a given example_id.
+
+        This is a frozen copy that only updates at sync boundaries (see sync_student_playbooks).
+        Returns the empty playbook if no snapshot has been synced yet.
+        """
+        key = self.get_playbook_key(example_id)
+        return self._student_playbooks.get(key, self.get_empty_playbook())
+
+    def should_sync_student(self) -> bool:
+        """Check whether the student playbook snapshot should be synced this step.
+
+        Uses the update_count of the first playbook key as the reference counter.
+        Returns True when update_count > 0 and divisible by sync_frequency.
+        """
+        if not self._playbooks:
+            return False
+        # Use the first available key's update_count as the reference
+        first_state = next(iter(self._playbooks.values()))
+        uc = first_state.get("update_count", 0)
+        return uc > 0 and uc % self._student_sync_frequency == 0
+
+    def sync_student_playbooks(self) -> None:
+        """Copy the current playbook to the student snapshot for all active keys."""
+        for key, state in self._playbooks.items():
+            self._student_playbooks[key] = state["playbook"]
+        n_synced = len(self._student_playbooks)
+        print(f"[PlaybookCU] Synced {n_synced} student playbook snapshot(s)")
+
+    # ------------------------------------------------------------------
     # Solution buffer
     # ------------------------------------------------------------------
 
@@ -407,6 +456,8 @@ class PlaybookContextUpdater:
         }
         if self.use_solution_buffer:
             d["solution_buffer"] = self._solution_buffer
+        if self.use_playbook_in_student_rollout:
+            d["student_playbooks"] = self._student_playbooks
         return d
 
     def load_state_dict(self, state_dict: dict):
@@ -427,6 +478,9 @@ class PlaybookContextUpdater:
                   f"{len(self._solution_buffer)} buffered solution(s) from checkpoint.")
         else:
             print(f"[PlaybookCU] Restored {len(self._playbooks)} playbook(s) from checkpoint.")
+        if self.use_playbook_in_student_rollout:
+            self._student_playbooks = state_dict.get("student_playbooks", {})
+            print(f"[PlaybookCU] Restored {len(self._student_playbooks)} student playbook snapshot(s) from checkpoint.")
 
     # ------------------------------------------------------------------
     # Concising (per playbook key)

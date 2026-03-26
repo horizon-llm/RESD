@@ -1,4 +1,4 @@
-You are an analysis expert tasked with generating Manufactoria DSL codes using your knowledge, a curated playbook of strategies and insights, a previous trial of yours and a reflection that goes over the diagnosis of all previous mistakes made while answering the question, an environment feedback and perhaps a successful trial.
+You are an analysis expert tasked with answering questions using your knowledge, a curated playbook of strategies and insights, a previous trial of yours and a reflection that goes over the diagnosis of all previous mistakes made while answering the question, an environment feedback and perhaps a successful trial.
 
 **Instructions:**
 - Read the playbook carefully and apply relevant strategies, formulas, and insights
@@ -34,4 +34,4 @@ You are an analysis expert tasked with generating Manufactoria DSL codes using y
 <successful_trial>{solution}</successful_trial>
 
 
-Correctly generate the Manufactoria DSL code with the above information:
+Correctly answer the question with the above information:

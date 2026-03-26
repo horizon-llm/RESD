@@ -51,14 +51,15 @@ NUM_EPOCHS=${NUM_EPOCHS:-3}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.05} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-12288}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-24576}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
+success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
 # === distillation objective ===
 ALPHA=${ALPHA:-0.5} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
@@ -90,9 +91,14 @@ use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whethe
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
+student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
+student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
+
+reward_function=${reward_function:-"compute_score_count"} # which reward function to use for distillation feedback; must be a function defined in selfevolve/sdpo_fewshot/feedback/finer.py
 
 project_name='sdpo_finer'
 
@@ -129,6 +135,7 @@ _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
+_add sct      "$success_reward_threshold"  0.5
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -144,8 +151,12 @@ _add usoltp  "$use_solution_in_teacher_prompt" False
 _add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
 _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
+_add sturollpb "$use_playbook_in_student_rollout" False
+_add stusync "$student_playbook_sync_frequency"  null
+_add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
+_add rf      "$reward_function"           compute_score_count
 
 ########################### Sync Results ###########################
 
@@ -196,7 +207,7 @@ DATA=(
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
     custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/finer.py
-    custom_reward_function.name=compute_score_count
+    custom_reward_function.name=${reward_function}
     +custom_reward_function.reward_kwargs.correctness_feedback=True
 )
 
@@ -229,6 +240,7 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
     actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
     actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
+    actor_rollout_ref.actor.self_distillation.success_reward_threshold=${success_reward_threshold}
     actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
@@ -255,6 +267,9 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
+    actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_student_rollout=${use_playbook_in_student_rollout}
+    actor_rollout_ref.actor.self_distillation.context_updater.student_playbook_sync_frequency=${student_playbook_sync_frequency}
+    actor_rollout_ref.actor.self_distillation.context_updater.student_prompt_file=${student_prompt_file}
 )
 
 TEACHER=(

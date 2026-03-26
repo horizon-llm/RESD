@@ -131,6 +131,10 @@ class ContextUpdaterConfig(BaseConfig):
     curator_prompt_file: Optional[str] = None
     cu_teacher_prompt_template: Optional[str] = None
     cu_teacher_prompt_file: Optional[str] = None
+    use_playbook_in_student_rollout: bool = False
+    student_playbook_sync_frequency: Optional[int] = None
+    student_prompt_template: Optional[str] = None
+    student_prompt_file: Optional[str] = None
 
     def __post_init__(self):
         valid_playbook_modes = ["global", "per_example"]

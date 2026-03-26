@@ -80,8 +80,9 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-from ...context_updater import ACEContextUpdater, PlaybookContextUpdater
+from ...context_updater import PlaybookContextUpdater
 from ...context_updater.prompts import TEACHER_PROMPT as _DEFAULT_TEACHER_PROMPT
+from ...context_updater.prompts import STUDENT_PROMPT as _DEFAULT_STUDENT_PROMPT
 from ...teacher import TeacherClient
 
 
@@ -353,11 +354,21 @@ class StreamRayPPOTrainer:
         self.context_updater = PlaybookContextUpdater(config) if self.use_context_updater else None
         if self.use_context_updater:
             ctx_cfg = config.actor_rollout_ref.actor.get("self_distillation", {}).get("context_updater", None)
-            self.cu_teacher_prompt_template = ACEContextUpdater._resolve_prompt_template(
+            self.cu_teacher_prompt_template = PlaybookContextUpdater._resolve_prompt_template(
                 ctx_cfg, "cu_teacher_prompt_file", "cu_teacher_prompt_template", _DEFAULT_TEACHER_PROMPT,
+            )
+            # Student rollout playbook: inject playbook snapshot into student prompt
+            self.use_playbook_in_student_rollout = _get_context_updater_cfg_value(
+                sd_cfg, nested_key="use_playbook_in_student_rollout",
+                legacy_key="use_playbook_in_student_rollout", default=False,
+            )
+            self.student_prompt_template = PlaybookContextUpdater._resolve_prompt_template(
+                ctx_cfg, "student_prompt_file", "student_prompt_template", _DEFAULT_STUDENT_PROMPT,
             )
         else:
             self.cu_teacher_prompt_template = _DEFAULT_TEACHER_PROMPT
+            self.use_playbook_in_student_rollout = False
+            self.student_prompt_template = _DEFAULT_STUDENT_PROMPT
 
         _teacher_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", {}).get("teacher", None)
         if _teacher_cfg and _teacher_cfg.get("enabled", False):
@@ -760,12 +771,18 @@ class StreamRayPPOTrainer:
         response_texts: list[str],
         dont_reprompt_on_self_success: bool = False,
         remove_thinking_from_demonstration: bool = False,
+        buffered_solution: Optional[str] = None,
     ) -> Optional[str]:
         uid = uids[idx]
         solution_idxs = success_by_uid[uid]
         if dont_reprompt_on_self_success:
             solution_idxs = [j for j in solution_idxs if j != idx]
         if len(solution_idxs) == 0:
+            # Fall back to buffered solution from a previous step
+            if buffered_solution is not None:
+                if remove_thinking_from_demonstration:
+                    buffered_solution = self._remove_thinking_trace(buffered_solution)
+                return buffered_solution
             return None
         solution_idx = solution_idxs[0]  # taking the first successful demonstration effectively selects a random one
         solution_str = response_texts[solution_idx]
@@ -896,7 +913,9 @@ class StreamRayPPOTrainer:
         response_mask = batch.batch["response_mask"]
         responses = batch.batch["responses"]
         response_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in responses]
-        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch["raw_prompt"]]
+        # Use original (pre-playbook-injection) raw_prompt for teacher/reflection prompts
+        _raw_key = "original_raw_prompt" if "original_raw_prompt" in batch.non_tensor_batch else "raw_prompt"
+        prompt_texts = [msgs[-1]["content"] for msgs in batch.non_tensor_batch[_raw_key]]
         batch_size = batch.batch.batch_size[0]
 
         # Extract env feedback if available and include_environment_feedback is enabled
@@ -951,7 +970,23 @@ class StreamRayPPOTrainer:
             finally:
                 self.checkpoint_manager.sleep_replicas()
 
+            # Sync student playbook snapshot after context update if sync frequency is met
+            if (self.use_playbook_in_student_rollout
+                    and isinstance(self.context_updater, PlaybookContextUpdater)
+                    and self.context_updater.should_sync_student()):
+                self.context_updater.sync_student_playbooks()
+                print(f"[ACE] Synced student playbook (step={self.global_steps})")
+
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
+
+        # Store successful trials into the solution buffer (context updater path only).
+        # Store raw text — thinking trace removal is handled downstream by _get_solution.
+        if self.use_context_updater and self.context_updater is not None and example_ids is not None:
+            for uid, idxs in success_by_uid.items():
+                if idxs:
+                    eid = example_ids[idxs[0]]
+                    self.context_updater.store_solution(eid, response_texts[idxs[0]])
+
         solution_strs = [
             self._get_solution(
                 i,
@@ -960,12 +995,17 @@ class StreamRayPPOTrainer:
                 response_texts,
                 self_distillation_cfg.dont_reprompt_on_self_success,
                 self_distillation_cfg.get("remove_thinking_from_demonstration", False),
+                buffered_solution=(
+                    self.context_updater.get_buffered_solution(example_ids[i])
+                    if self.use_context_updater and self.context_updater is not None and example_ids is not None
+                    else None
+                ),
             )
             for i in range(batch_size)
         ]
 
         def _build_teacher_message(i: int) -> list[dict]:
-            system_messages = batch.non_tensor_batch["raw_prompt"][i][:-1]
+            system_messages = batch.non_tensor_batch[_raw_key][i][:-1]
             has_solution = solution_strs[i] is not None
             has_feedback = feedback_list[i] is not None
             has_teacher_feedback = teacher_feedback_list[i] is not None
@@ -1046,6 +1086,7 @@ class StreamRayPPOTrainer:
                     and _get_context_updater_cfg_value(
                         self_distillation_cfg,
                         nested_key="use_solution_in_teacher_prompt",
+                        legacy_key="use_solution_in_teacher_prompt",
                         default=False,
                     )
                 )
@@ -1171,7 +1212,7 @@ class StreamRayPPOTrainer:
                 pb = ""
             playbook_used.append(
                 self.use_context_updater
-                and pb != ACEContextUpdater.get_empty_playbook()
+                and pb != PlaybookContextUpdater.get_empty_playbook()
                 and use_playbook_in_teacher_prompt
             )
 
@@ -1258,6 +1299,65 @@ class StreamRayPPOTrainer:
             gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
+
+    def _inject_playbook_into_batch(self, batch: DataProto) -> None:
+        """Inject the student playbook snapshot into batch prompts before generation.
+
+        Modifies raw_prompt in-place. Tokenization happens downstream in generate_sequences
+        (via agent loop's apply_chat_template). Stores the original raw_prompt as
+        'original_raw_prompt' for teacher/reflection prompt construction.
+        """
+        if not self.use_playbook_in_student_rollout:
+            return
+        if not self.use_context_updater or self.context_updater is None:
+            return
+        if "raw_prompt" not in batch.non_tensor_batch:
+            return
+
+        # Extract example IDs for per-example playbook lookup
+        example_ids = None
+        if "extra_info" in batch.non_tensor_batch:
+            example_ids = [info["index"] for info in batch.non_tensor_batch["extra_info"]]
+
+        raw_prompts = batch.non_tensor_batch["raw_prompt"]
+        batch_size = len(raw_prompts)
+
+        # Collect playbooks and check if any are non-empty
+        empty_pb = PlaybookContextUpdater.get_empty_playbook()
+        playbooks = []
+        any_playbook = False
+        for i in range(batch_size):
+            eid = example_ids[i] if example_ids is not None else "__global__"
+            pb = self.context_updater.get_student_playbook(eid)
+            playbooks.append(pb)
+            if pb != empty_pb:
+                any_playbook = True
+
+        if not any_playbook:
+            return  # All playbooks empty, skip injection
+
+        # Save original raw_prompt for teacher/reflection prompt construction
+        batch.non_tensor_batch["original_raw_prompt"] = raw_prompts.copy()
+
+        # Build new messages with playbook injected via student prompt template
+        new_messages = []
+        for i in range(batch_size):
+            system_messages = raw_prompts[i][:-1]
+            original_prompt_text = raw_prompts[i][-1]["content"]
+
+            if playbooks[i] != empty_pb:
+                student_text = self.student_prompt_template.format(
+                    playbook=playbooks[i], prompt=original_prompt_text,
+                )
+            else:
+                student_text = original_prompt_text
+
+            new_messages.append(system_messages + [{"role": "user", "content": student_text}])
+
+        batch.non_tensor_batch["raw_prompt"] = np.array(new_messages, dtype=object)
+
+        n_injected = sum(1 for pb in playbooks if pb != empty_pb)
+        print(f"[StudentPlaybook] Injected playbook into {n_injected}/{batch_size} samples")
 
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
@@ -2173,6 +2273,10 @@ class StreamRayPPOTrainer:
             batch.non_tensor_batch["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
             )
+
+            # Inject student playbook into prompts before generation
+            self._inject_playbook_into_batch(batch)
+
             base_batch = deepcopy(batch)
 
             prev_scores = None
