@@ -846,7 +846,7 @@ def run_tests(test_cases: dict, solution, sparse_rewards, max_test_cases, max_wo
     return records
 
 
-def compute_score(solution_str: str, ground_truth: str, extra_info = None, sparse_rewards=False, max_test_cases=None, max_workers=None, **kwargs):
+def compute_score(solution_str: str, ground_truth: str, extra_info = None, sparse_rewards=False, max_test_cases=None, max_workers=None, report_response_length=False, **kwargs):
     split = extra_info["split"]
     was_truncated = extra_info.get("truncated", False)
 
@@ -887,7 +887,7 @@ def compute_score(solution_str: str, ground_truth: str, extra_info = None, spars
     if FORMAT_PENALTY and split == "train" and incorrect_format and (not was_truncated):
         reward -= 0.5
 
-    return {
+    result = {
         "score": reward,
         "acc": accuracy,
         "pred": predictions,
@@ -899,3 +899,6 @@ def compute_score(solution_str: str, ground_truth: str, extra_info = None, spars
         "truncated_and_missing_answer": 1 if incorrect_format and was_truncated else 0,
         "feedback": format_test_feedback(records, was_truncated=was_truncated),
     }
+    if report_response_length:
+        result["response_length"] = extra_info.get("response_length_tokens", len(solution_str))
+    return result

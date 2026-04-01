@@ -80,6 +80,7 @@ class NaiveRewardManager(AbstractRewardManager):
             num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
             extra_info["num_turns"] = num_turns
+            extra_info["response_length_tokens"] = int(valid_response_length)
             extra_info["rollout_reward_scores"] = rollout_reward_scores
             extra_info["truncated"] = not (valid_response_ids == self.tokenizer.eos_token_id).any().item()
 

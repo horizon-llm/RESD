@@ -764,11 +764,14 @@ class RayPPOTrainer:
     ) -> Optional[str]:
         uid = uids[idx]
         solution_idxs = success_by_uid[uid]
+        self_is_successful = False
         if dont_reprompt_on_self_success:
+            self_is_successful = idx in solution_idxs
             solution_idxs = [j for j in solution_idxs if j != idx]
         if len(solution_idxs) == 0:
-            # Fall back to buffered solution from a previous step
-            if buffered_solution is not None:
+            # Fall back to buffered solution from a previous step,
+            # but not if the current rollout is already correct
+            if buffered_solution is not None and not self_is_successful:
                 if remove_thinking_from_demonstration:
                     buffered_solution = self._remove_thinking_trace(buffered_solution)
                 return buffered_solution
