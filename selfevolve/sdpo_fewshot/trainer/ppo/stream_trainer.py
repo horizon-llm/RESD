@@ -1178,14 +1178,30 @@ class StreamRayPPOTrainer:
         # Compute which samples actually use each feedback type
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
         teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
-        feedback_used = [
-            feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
-            for i in range(batch_size)
-        ]
-        teacher_feedback_used = [
-            teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
-            for i in range(batch_size)
-        ]
+        if self.use_context_updater:
+            use_feedback_in_teacher_prompt = _get_context_updater_cfg_value(
+                self_distillation_cfg,
+                nested_key="use_feedback_in_teacher_prompt",
+                legacy_key="use_feedback_in_teacher_prompt",
+                default=False,
+            )
+            feedback_used = [
+                feedback_list[i] is not None and use_feedback_in_teacher_prompt
+                for i in range(batch_size)
+            ]
+            teacher_feedback_used = [
+                teacher_feedback_list[i] is not None
+                for i in range(batch_size)
+            ]
+        else:
+            feedback_used = [
+                feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
+                for i in range(batch_size)
+            ]
+            teacher_feedback_used = [
+                teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
+                for i in range(batch_size)
+            ]
 
         # ACE-specific usage tracking
         use_reflection_in_teacher_prompt = _get_context_updater_cfg_value(
@@ -1195,8 +1211,8 @@ class StreamRayPPOTrainer:
             default=False,
         )
         reflection_used = [
-            self.use_context_updater and reflection_list is not None
-            and reflection_list[i] is not None and use_reflection_in_teacher_prompt
+            bool(self.use_context_updater and reflection_list is not None
+            and reflection_list[i] and use_reflection_in_teacher_prompt)
             for i in range(batch_size)
         ]
         use_playbook_in_teacher_prompt = _get_context_updater_cfg_value(

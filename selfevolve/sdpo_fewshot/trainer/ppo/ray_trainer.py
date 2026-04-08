@@ -1151,14 +1151,30 @@ class RayPPOTrainer:
         # Compute which samples actually use feedback (accounting for environment_feedback_only_without_solution)
         feedback_only_without_solution = self_distillation_cfg.get("environment_feedback_only_without_solution", False)
         teacher_feedback_only_without_solution = self_distillation_cfg.get("teacher_feedback_only_without_solution", False)
-        feedback_used = [
-            feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
-            for i in range(batch_size)
-        ]
-        teacher_feedback_used = [
-            teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
-            for i in range(batch_size)
-        ]
+        if self.use_context_updater:
+            use_feedback_in_teacher_prompt = _get_context_updater_cfg_value(
+                self_distillation_cfg,
+                nested_key="use_feedback_in_teacher_prompt",
+                legacy_key="use_feedback_in_teacher_prompt",
+                default=False,
+            )
+            feedback_used = [
+                feedback_list[i] is not None and use_feedback_in_teacher_prompt
+                for i in range(batch_size)
+            ]
+            teacher_feedback_used = [
+                teacher_feedback_list[i] is not None
+                for i in range(batch_size)
+            ]
+        else:
+            feedback_used = [
+                feedback_list[i] is not None and (not feedback_only_without_solution or solution_strs[i] is None)
+                for i in range(batch_size)
+            ]
+            teacher_feedback_used = [
+                teacher_feedback_list[i] is not None and (not teacher_feedback_only_without_solution or solution_strs[i] is None)
+                for i in range(batch_size)
+            ]
 
         # ACE-specific usage tracking
         use_reflection_in_teacher_prompt = _get_context_updater_cfg_value(
@@ -1883,8 +1899,18 @@ class RayPPOTrainer:
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
+            # Skip restoring dataloader state at exact epoch boundaries.
+            # StatefulDataLoader saves an "exhausted" state at the end of an epoch,
+            # which causes the next `for batch in dataloader` to yield nothing.
+            steps_per_epoch = len(self.train_dataloader)
+            if steps_per_epoch > 0 and self.global_steps % steps_per_epoch == 0:
+                print(
+                    f"Checkpoint at epoch boundary (step {self.global_steps}), "
+                    f"skipping dataloader state restore to start fresh epoch"
+                )
+            else:
+                dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+                self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 

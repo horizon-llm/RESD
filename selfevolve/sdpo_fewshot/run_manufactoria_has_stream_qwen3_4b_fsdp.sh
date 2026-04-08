@@ -57,13 +57,13 @@ DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
 # === distillation objective ===
-ALPHA=${ALPHA:-0.5} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
+ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
 distillation_top_p=${distillation_top_p:-null}
 distillation_max_k=${distillation_max_k:-null} # maximum number of tokens to keep when using top-p (memory cap); null means no limit
 distillation_token_selector=${distillation_token_selector:-"student"} # "student": use student's topk/top-p as support; "teacher": use teacher's topk/top-p as support; "union": use the union of student and teacher support
-teacher_prob_min_ratio=${teacher_prob_min_ratio:-null} # Clamp teacher prob to be at least this proportion of student prob; null disables
+teacher_prob_min_ratio=${teacher_prob_min_ratio:-0.2} # Clamp teacher prob to be at least this proportion of student prob; null disables
 teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
 position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
 position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True

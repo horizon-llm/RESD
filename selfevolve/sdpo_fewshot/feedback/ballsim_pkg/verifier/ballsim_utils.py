@@ -1,13 +1,16 @@
 import base64
+import ctypes
 import json
 import logging
 import math
 import multiprocessing
 import os
 import pickle
+import re
 import shutil
 import sys
 import time
+import traceback
 import zlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -194,6 +197,195 @@ def get_successful_tests_fast(
             p.kill()
 
     return [shared_test_results[i] for i in range(len(tests))], [shared_runtimes[i] for i in range(len(tests))]
+
+
+# -------------------------------------------------------------
+# Detailed test runner — decomposes assert to capture actual
+# output and distinguish exceptions from real timeouts.
+# -------------------------------------------------------------
+_DETAIL_BUF_SIZE = 4096
+
+# Regex to decompose: assert check_distance(predict_position(T), EXPECTED) <= THRESHOLD
+_ASSERT_RE = re.compile(
+    r'\s*assert\s+check_distance\(\s*predict_position\((.+?)\)\s*,\s*(\[.+\])\s*\)\s*<=\s*([0-9.]+)'
+)
+
+
+def _write_shared_buf(buf, text: str) -> None:
+    """Write a UTF-8 string into a ctypes c_char shared array."""
+    encoded = text.encode("utf-8", errors="replace")[: _DETAIL_BUF_SIZE - 1]
+    buf.value = encoded
+
+
+def _read_shared_buf(buf) -> str:
+    """Read a UTF-8 string from a ctypes c_char shared array."""
+    raw = buf.value
+    if not raw:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _run_test_decomposed(
+    func: str,
+    test: str,
+    result_array,
+    index: int,
+    runtimes_array,
+    error_buf,
+    actual_buf,
+) -> None:
+    """Run a single test by decomposing the assert to capture actual output
+    and produce precise error information.
+
+    Shared-memory conventions (read by the parent after join/kill):
+      - runtimes_array[index]:
+            > 0  → code ran to completion in that many seconds
+           -1.0  → process was killed (real timeout) — initial value, never overwritten
+           -2.0  → Python exception raised before the assertion could be checked
+      - error_buf: empty when passed, or exception / wrong-answer description
+      - actual_buf: empty when passed, or JSON of predict_position return value
+    """
+    reliability_guard()
+    try:
+        execution_context: Dict[str, Any] = {}
+        execution_context.update({"__builtins__": __builtins__})
+        execution_context["check_distance"] = check_distance
+
+        # ---- Step 1: exec the function definition ----
+        try:
+            exec(func, execution_context)
+        except Exception as e:
+            result_array[index] = 0
+            runtimes_array[index] = -2.0
+            _write_shared_buf(error_buf, f"DefinitionError: {type(e).__name__}: {e}")
+            return
+
+        # ---- Step 2: try to decompose the assert ----
+        m = _ASSERT_RE.match(test)
+        if m:
+            t_arg = m.group(1)
+            expected_str = m.group(2)
+            threshold_str = m.group(3)
+
+            # 2a. Run predict_position(t) and capture the return value
+            try:
+                start_time = time.time()
+                actual_result = eval(f"predict_position({t_arg})", execution_context)
+                end_time = time.time()
+                runtimes_array[index] = end_time - start_time
+            except Exception as e:
+                result_array[index] = 0
+                runtimes_array[index] = -2.0
+                tb_lines = traceback.format_exc()
+                _write_shared_buf(error_buf, f"{type(e).__name__}: {e}\n{tb_lines}")
+                return
+
+            # Store actual output for the parent
+            try:
+                _write_shared_buf(actual_buf, json.dumps(actual_result))
+            except Exception:
+                _write_shared_buf(actual_buf, str(actual_result))
+
+            # 2b. Evaluate check_distance
+            try:
+                expected = eval(expected_str)
+                threshold = float(threshold_str)
+                dist = check_distance(actual_result, expected)
+            except Exception as e:
+                result_array[index] = 0
+                # runtime already set (positive) from step 2a
+                _write_shared_buf(error_buf, f"{type(e).__name__}: {e}")
+                return
+
+            if dist <= threshold:
+                result_array[index] = 1
+            else:
+                result_array[index] = 0
+                # Build per-ball distances
+                per_ball = []
+                try:
+                    for i, (a, e_pt) in enumerate(zip(actual_result, expected)):
+                        d = math.sqrt((a[0] - e_pt[0]) ** 2 + (a[1] - e_pt[1]) ** 2)
+                        per_ball.append(f"Ball {i+1}: off by {d:.1f}m "
+                                        f"(got [{a[0]}, {a[1]}], expected [{e_pt[0]}, {e_pt[1]}])")
+                except Exception:
+                    pass
+                detail = (f"WrongAnswer: avg_distance={dist:.3f}, threshold={threshold}\n"
+                          + "\n".join(per_ball))
+                _write_shared_buf(error_buf, detail)
+        else:
+            # ---- Fallback: run the raw assert (non-standard format) ----
+            try:
+                start_time = time.time()
+                exec(test, execution_context)
+                end_time = time.time()
+                result_array[index] = 1
+                runtimes_array[index] = end_time - start_time
+            except Exception as e:
+                result_array[index] = 0
+                runtimes_array[index] = -2.0
+                tb_lines = traceback.format_exc()
+                _write_shared_buf(error_buf, f"{type(e).__name__}: {e}\n{tb_lines}")
+    finally:
+        partial_undo_reliability_guard()
+
+
+def get_successful_tests_with_details(
+    program: str, tests: List[str], max_execution_time: float = 1.0
+) -> Tuple[List[int], List[float], List[str], List[str]]:
+    """Enhanced version of get_successful_tests_fast.
+
+    Returns:
+        (results, runtimes, errors, actuals)
+        - results:  list of 0/1
+        - runtimes: list of floats (>0 = ran, -1.0 = timeout, -2.0 = exception)
+        - errors:   list of error description strings (empty on success / real timeout)
+        - actuals:  list of JSON-encoded actual output strings (empty if code never returned)
+    """
+    test_ct = len(tests)
+    if test_ct == 0:
+        return [], [], [], []
+    if not should_execute(program=program, tests=tests):
+        logger.info("Not executing program %s", program)
+        return (
+            [0] * test_ct,
+            [-1.0] * test_ct,
+            ["Blocked by safety filter (restricted patterns in code)."] * test_ct,
+            [""] * test_ct,
+        )
+
+    shared_results = multiprocessing.Array("i", test_ct)
+    shared_runtimes = multiprocessing.Array("d", test_ct)
+    for i in range(test_ct):
+        shared_results[i] = 0
+        shared_runtimes[i] = -1.0  # sentinel for "killed / never finished"
+
+    errors: List[str] = []
+    actuals: List[str] = []
+
+    for idx, test in enumerate(tests):
+        error_buf = multiprocessing.Array(ctypes.c_char, _DETAIL_BUF_SIZE)
+        actual_buf = multiprocessing.Array(ctypes.c_char, _DETAIL_BUF_SIZE)
+
+        p = multiprocessing.Process(
+            target=_run_test_decomposed,
+            args=(program, test, shared_results, idx, shared_runtimes, error_buf, actual_buf),
+        )
+        p.start()
+        p.join(timeout=max_execution_time)
+        if p.is_alive():
+            p.kill()
+            p.join()
+
+        errors.append(_read_shared_buf(error_buf))
+        actuals.append(_read_shared_buf(actual_buf))
+
+    return (
+        [shared_results[i] for i in range(test_ct)],
+        [shared_runtimes[i] for i in range(test_ct)],
+        errors,
+        actuals,
+    )
 
 
 # -------------------------------------------------------------

@@ -24,32 +24,27 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
-    --train_data_source manufactoria/has_train \
-    --test_data_source manufactoria/has_test \
-    --num_data ${NUM_DATA} \
-    --data_source_suffix "has"
+python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/sudoku --num_data $NUM_DATA
 
-train_path=selfevolve/sdpo/datasets/manufactoria/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/manufactoria/test.parquet
+train_path=selfevolve/sdpo/datasets/sudoku/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo/datasets/sudoku/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=manufactoria
+TASK=sudoku
 export TASK
 
 # === optim ===
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
-LR=${LR:-1e-6}
+LR=${LR:-5e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
+NUM_EPOCHS=${NUM_EPOCHS:-4}
 # === model ===
-FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"} # "fsdp" or "fsdp2"
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
@@ -57,6 +52,7 @@ ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only u
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
+success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
 # === distillation objective ===
 ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
@@ -87,24 +83,22 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/manufactoria_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sudoku_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
 student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
 student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
-# === reward function ===
-sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_manufactoria'
+project_name='sdpo_sudoku'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_$FSDP_STRATEGY"
+exp_name="qwen3_4b_fsdp"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
@@ -132,6 +126,7 @@ _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
+_add sct      "$success_reward_threshold"  0.5
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -152,7 +147,6 @@ _add stusync "$student_playbook_sync_frequency"  null
 _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
-_add sparse  "$sparse_rewards"             False
 
 ########################### Sync Results ###########################
 
@@ -196,15 +190,15 @@ DATA=(
     data.train_files=${train_path}
     data.val_files=${val_path}
     data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.val_batch_size=64
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/manufactoria.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/reasoning_gym_games/__init__.py
     custom_reward_function.name=compute_score
-    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
@@ -213,14 +207,13 @@ MODEL=(
 )
 
 ACTOR=(
-    actor_rollout_ref.actor.strategy=$FSDP_STRATEGY
     actor_rollout_ref.actor.optim.lr=$LR
     actor_rollout_ref.actor.ppo_mini_batch_size=32
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=74752
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -237,6 +230,7 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
     actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
     actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
+    actor_rollout_ref.actor.self_distillation.success_reward_threshold=${success_reward_threshold}
     actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
@@ -281,8 +275,8 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=69632
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55
+    actor_rollout_ref.rollout.max_model_len=74752
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95

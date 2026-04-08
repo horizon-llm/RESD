@@ -73,6 +73,8 @@ from verl.utils.fsdp_utils import (
     layered_summon_lora_params,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    merged_lora_context,
+    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
@@ -684,16 +686,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
         peft_config = None
+        merge_lora = self.config.model.lora.get("merge", False) if hasattr(self.config.model, "lora") else False
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.actor_module_fsdp,
-                layered_summon=self.config.rollout.get("layered_summon", False),
-                base_sync_done=self.base_sync_done,
-            )
-            if not self.base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if merge_lora:
+                # Merge LoRA into base weights so vLLM sees a plain model (no LoRA kernel).
+                # Use backup_adapters=False so the context does a proper FSDP-aware
+                # unmerge (layer-by-layer summon_full_params + writeback) on exit,
+                # instead of raw param.data.copy_ which corrupts DTensor state.
+                with merged_lora_context(self.actor_module_fsdp, backup_adapters=False):
+                    params = self.actor_module_fsdp.state_dict()
+                    params = normalize_peft_param_name(params)
+                # peft_config stays None — vLLM loads full merged weights
+            else:
+                peft_config = peft_model.peft_config.get("default", None)
+                params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+                if not self.base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
 
@@ -701,11 +714,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         )
 
-        # Special handling for LoRA with sleep_level=2:
+        # Special handling for LoRA with sleep_level=2 (non-merge path only):
         # When sleep_level=2, base model weights are destroyed during each sleep cycle.
         # separately collect and update LoRA weights and base model weights through their respective interfaces.
         # Here: params contains LoRA weights, base_model_params contains base model weights.
-        if peft_config is not None and getattr(self.rollout, "sleep_level", None) == 2:
+        if peft_config is not None and not merge_lora and getattr(self.rollout, "sleep_level", None) == 2:
             base_model_params = collect_lora_params(
                 module=self.actor_module_fsdp,
                 layered_summon=self.layered_summon,

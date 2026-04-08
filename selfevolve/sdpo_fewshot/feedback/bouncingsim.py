@@ -44,6 +44,7 @@ def _load_ballsim_utils():
 _ballsim = _load_ballsim_utils()
 decode_tests = _ballsim.decode_tests
 get_successful_tests_fast = _ballsim.get_successful_tests_fast
+get_successful_tests_with_details = _ballsim.get_successful_tests_with_details
 should_execute = _ballsim.should_execute
 
 INCORRECT_FORMAT = "Incorrect format"
@@ -78,6 +79,9 @@ def run_tests(
     Run program against assert tests. Returns records matching code.py / manufactoria:
       {test_idx, input, expected, actual, passed, debug, time}
     Here `input` holds the assert string; `expected` is empty (assertions are self-contained).
+
+    Uses the decomposed test runner to distinguish real timeouts from exceptions
+    and to capture actual output on wrong-answer cases.
     """
     if not tests:
         return []
@@ -113,7 +117,7 @@ def run_tests(
         ]
 
     try:
-        results, runtimes = get_successful_tests_fast(
+        results, runtimes, errors, actuals = get_successful_tests_with_details(
             program=program,
             tests=tests,
             max_execution_time=max_execution_time,
@@ -135,19 +139,26 @@ def run_tests(
     for i, test in enumerate(tests):
         r = results[i] if i < len(results) else 0
         rt = runtimes[i] if i < len(runtimes) else -1.0
+        err = errors[i] if i < len(errors) else ""
+        act_output = actuals[i] if i < len(actuals) else ""
         passed = r == 1
 
         if passed:
             actual = "passed"
             debug = f"runtime_s={rt:.4f}" if rt is not None and rt >= 0 else ""
+        elif rt == -1.0 and not err:
+            # Process was killed — real timeout (runtime sentinel was never overwritten)
+            actual = f"{ERROR_PREFIX}Time limit exceeded (killed after {max_execution_time}s). " \
+                     f"Your code likely has an infinite loop in collision handling."
+            debug = ""
+        elif err.startswith("WrongAnswer:"):
+            # Code ran but produced wrong positions
+            actual = err  # e.g. "WrongAnswer: avg_distance=127.5, threshold=50.0\nBall 1: ..."
+            debug = f"actual_output={act_output}" if act_output else ""
         else:
-            # get_successful_tests_fast does not surface exception text; distinguish timeout heuristically
-            if rt is not None and rt < 0:
-                actual = f"{ERROR_PREFIX}Time limit exceeded or process error."
-                debug = f"runtime_s={rt}"
-            else:
-                actual = f"{ERROR_PREFIX}Assertion failed or runtime error in test."
-                debug = f"runtime_s={rt:.4f}" if rt is not None and rt >= 0 else ""
+            # Exception raised (runtime == -2.0 or positive with error)
+            actual = f"{ERROR_PREFIX}{err}" if err else f"{ERROR_PREFIX}Unknown error."
+            debug = f"actual_output={act_output}" if act_output else ""
 
         records.append(
             {
@@ -235,6 +246,7 @@ def format_test_feedback(
 
         is_error = isinstance(actual, str) and actual.startswith(ERROR_PREFIX)
         is_incorrect_format = actual == INCORRECT_FORMAT
+        is_wrong_answer = isinstance(actual, str) and actual.startswith("WrongAnswer:")
 
         if is_error:
             if "safety filter" in actual:
@@ -247,6 +259,11 @@ def format_test_feedback(
                 parts.append("Runtime Error")
                 parts.append(actual[len(ERROR_PREFIX) :])
             parts.append("")
+            t_match = re.search(r'predict_position\(([^)]+)\)', assert_text)
+            if t_match:
+                parts.append("Input")
+                parts.append(f"t = {t_match.group(1)}")
+                parts.append("")
             parts.append("Assert")
             parts.append(_truncate_str(assert_text, max_input_chars))
             _render_debug_block(debug_text)
@@ -255,6 +272,28 @@ def format_test_feedback(
                 parts.append("Truncated Attempt: Your previous response was too long and truncated.")
             else:
                 parts.append("Incorrect Format: Put your code inside a ```python ... ``` block.")
+        elif is_wrong_answer:
+            # Enriched wrong-answer feedback with per-ball distance breakdown
+            parts.append(f"Test Case {test_idx}: Wrong Answer")
+            # Parse the WrongAnswer detail lines
+            wa_lines = actual.split("\n")
+            # First line: "WrongAnswer: avg_distance=X, threshold=Y"
+            parts.append(wa_lines[0].replace("WrongAnswer: ", ""))
+            parts.append("")
+            # Extract and show the time input explicitly
+            t_match = re.search(r'predict_position\(([^)]+)\)', assert_text)
+            if t_match:
+                parts.append("Input")
+                parts.append(f"t = {t_match.group(1)}")
+                parts.append("")
+            # Per-ball breakdown (remaining lines)
+            if len(wa_lines) > 1:
+                parts.append("Per-Ball Distances")
+                for line in wa_lines[1:]:
+                    if line.strip():
+                        parts.append(_truncate_str(line, max_actual_chars))
+                parts.append("")
+            _render_debug_block(debug_text)
         else:
             parts.append(f"Test Case {test_idx}: Wrong Answer")
             parts.append("")
