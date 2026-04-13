@@ -274,6 +274,12 @@ class SelfDistillationConfig(BaseConfig):
     teacher: TeacherFeedbackConfig = field(default_factory=TeacherFeedbackConfig)
     context_updater: Optional[ContextUpdaterConfig] = None
 
+    # RLSD (RLVR with Self-Distillation) config — used when policy_loss.loss_mode == "rlsd"
+    rlsd_lambda_init: float = 0.5       # initial mixing coefficient for token-level credit
+    rlsd_lambda_final: float = 0.0      # final mixing coefficient (decays linearly)
+    rlsd_lambda_warmdown_steps: int = 50  # steps over which lambda decays
+    rlsd_epsilon_w: float = 0.2         # clip range for evidence weights w_t
+
     # Legacy flat context-updater fields kept for backward compatibility.
     use_context_updater: bool = False
     concise_frequency: Optional[int] = 4

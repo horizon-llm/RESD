@@ -23,16 +23,19 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1}
+NUM_DATA=${NUM_DATA:-320}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
+    --data_source bouncingsim/bouncingsim-MULTIOBJ-easy \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "multiobj_easy"
 
-train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo_fewshot/datasets/sudoku/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=sudoku
+TASK=bouncingsim_multiobj_easy
 export TASK
 
 # === optim ===
@@ -82,7 +85,7 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sudoku_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
 student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
 student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
@@ -93,8 +96,10 @@ feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher f
 max_updates_per_batch=${max_updates_per_batch:-8}
 min_updates_per_batch=${min_updates_per_batch:-8}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
+# === reward function ===
+sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_stream_sudoku'
+project_name='sdpo_stream_bouncingsim_multiobj_easy'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -152,6 +157,7 @@ _add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
 _add minupb  "$min_updates_per_batch"      1
 _add esith   "$early_stop_improvement_threshold" 0.0
+_add sparse  "$sparse_rewards"             False
 
 ########################### Sync Results ###########################
 
@@ -201,12 +207,13 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/reasoning_gym_games/__init__.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/bouncingsim.py
     custom_reward_function.name=compute_score
+    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
+    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Thinking-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 
@@ -306,7 +313,7 @@ TRAINER=(
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
-    trainer.nnodes=1
+    trainer.nnodes=2
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=2
     trainer.test_freq=2

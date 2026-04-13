@@ -1948,6 +1948,7 @@ class StreamRayPPOTrainer:
             f.write(str(step))
 
     def _load_checkpoint(self):
+        self._resumed_batch_idx = 0
         if self.config.trainer.resume_mode == "disable":
             return 0
 
@@ -1995,6 +1996,14 @@ class StreamRayPPOTrainer:
         if os.path.exists(dataloader_local_path):
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
+            # Extract consumed batch count so enumerate can resume from the right index.
+            # StatefulDataLoader stores this in _SNAPSHOT/_snapshot_step (multi-process)
+            # or _NUM_YIELDED (single-process).
+            if "_SNAPSHOT" in dataloader_state_dict and "_snapshot_step" in dataloader_state_dict["_SNAPSHOT"]:
+                self._resumed_batch_idx = dataloader_state_dict["_SNAPSHOT"]["_snapshot_step"]
+            elif "_NUM_YIELDED" in dataloader_state_dict:
+                self._resumed_batch_idx = dataloader_state_dict["_NUM_YIELDED"]
+            print(f"Resuming dataloader from batch_idx={self._resumed_batch_idx}")
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
@@ -2273,7 +2282,7 @@ class StreamRayPPOTrainer:
         )
         next_step_profile = False
 
-        for batch_idx, batch_dict in enumerate(self.train_dataloader):
+        for batch_idx, batch_dict in enumerate(self.train_dataloader, start=self._resumed_batch_idx):
             if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                 self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
             metrics = {}

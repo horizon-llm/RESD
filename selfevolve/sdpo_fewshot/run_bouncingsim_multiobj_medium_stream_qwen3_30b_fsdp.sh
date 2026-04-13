@@ -23,19 +23,19 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 ########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1}
+NUM_DATA=${NUM_DATA:-320}
 
 python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
     --data_source bouncingsim/bouncingsim-MULTIOBJ-medium \
     --num_data ${NUM_DATA} \
     --data_source_suffix "multiobj_medium"
 
-train_path=selfevolve/sdpo/datasets/bouncingsim/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/bouncingsim/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_medium/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_medium/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=bouncingsim
+TASK=bouncingsim_multiobj_medium
 export TASK
 
 # === optim ===
@@ -47,7 +47,7 @@ CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
@@ -224,7 +224,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=74752
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -286,7 +286,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.55
-    actor_rollout_ref.rollout.max_model_len=69632
+    actor_rollout_ref.rollout.max_model_len=74752
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
@@ -315,7 +315,7 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=2
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=2
+    trainer.save_freq=1
     trainer.test_freq=2
     trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True

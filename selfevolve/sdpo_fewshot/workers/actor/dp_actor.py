@@ -31,7 +31,7 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from ...trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_self_distillation_loss
+from ...trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_self_distillation_loss, compute_rlsd_token_advantages
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -247,7 +247,7 @@ class DataParallelPPOActor(BasePPOActor):
             getattr(self.config, "self_distillation", None)
         )
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if not self_distillation_cfg or loss_mode != "sdpo":
+        if not self_distillation_cfg or loss_mode not in ("sdpo", "rlsd"):
             return
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
         if teacher_regularization != "ema":
@@ -831,7 +831,8 @@ class DataParallelPPOActor(BasePPOActor):
         pad_token_id = data.meta_info.get("pad_token_id", 0)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-        self_distillation_enabled = loss_mode == "sdpo"
+        rlsd_enabled = loss_mode == "rlsd"
+        self_distillation_enabled = loss_mode == "sdpo" or rlsd_enabled
         self_distillation_cfg = self._resolve_self_distillation_cfg(
             getattr(self.config, "self_distillation", None)
         )
@@ -963,7 +964,29 @@ class DataParallelPPOActor(BasePPOActor):
                     ):
                         raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
 
-                    if token_selector == "student":
+                    if rlsd_enabled:
+                        # RLSD only needs per-token log probs, skip full-logit/topk/union logic
+                        outputs = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                        )
+                        log_prob = outputs["log_probs"]
+                        entropy = outputs["entropys"] if calculate_entropy else None
+
+                        with torch.no_grad():
+                            teacher_outputs = self._forward_micro_batch(
+                                teacher_inputs, temperature=temperature, calculate_entropy=False,
+                                module=teacher_model,
+                            )
+                        teacher_log_prob = teacher_outputs["log_probs"]
+                        teacher_entropy = None
+                        # Set unused variables to None for consistency
+                        student_all_logps = None
+                        teacher_all_logps = None
+                        student_topk_logps = None
+                        teacher_topk_logps = None
+                        student_topk_indices = None
+
+                    elif token_selector == "student":
                         # Student discovers indices, teacher gathers at those indices
                         outputs = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
@@ -1102,7 +1125,42 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
-                    if self_distillation_enabled:
+                    if rlsd_enabled:
+                        # RLSD: compute token-level weighted advantages, then use vanilla PPO loss
+                        _rlsd_lambda_init = getattr(self_distillation_cfg, "rlsd_lambda_init", 0.5)
+                        _rlsd_lambda_final = getattr(self_distillation_cfg, "rlsd_lambda_final", 0.0)
+                        _rlsd_warmdown = getattr(self_distillation_cfg, "rlsd_lambda_warmdown_steps", 50)
+                        _rlsd_eps_w = getattr(self_distillation_cfg, "rlsd_epsilon_w", 0.2)
+
+                        if self._update_step >= _rlsd_warmdown:
+                            _rlsd_lambda = _rlsd_lambda_final
+                        else:
+                            frac = self._update_step / max(_rlsd_warmdown, 1)
+                            _rlsd_lambda = _rlsd_lambda_init + (_rlsd_lambda_final - _rlsd_lambda_init) * frac
+
+                        rlsd_advantages, rlsd_metrics = compute_rlsd_token_advantages(
+                            advantages=advantages,
+                            teacher_log_prob=teacher_log_prob.detach(),
+                            student_log_prob=log_prob.detach(),
+                            response_mask=response_mask,
+                            lambda_mix=_rlsd_lambda,
+                            epsilon_w=_rlsd_eps_w,
+                        )
+                        micro_batch_metrics.update(rlsd_metrics)
+
+                        policy_loss_fn = get_policy_loss_fn("vanilla")
+                        pg_loss, pg_metrics = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=rlsd_advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                        )
+                        micro_batch_metrics.update(pg_metrics)
+
+                    elif self_distillation_enabled:
                         remove_thinking_in_loss = self_distillation_cfg.get("remove_thinking_in_loss", False)
                         if remove_thinking_in_loss:
                             end_think_token_id = data.meta_info.get("end_think_token_id", None)

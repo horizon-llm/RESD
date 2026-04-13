@@ -178,8 +178,8 @@ def run_tests(
 def format_test_feedback(
     records,
     was_truncated=False,
-    max_tests_to_show=2,
-    sort_test_cases_by_length=True,
+    max_tests_to_show=3,
+    sort_test_cases_by_length=False,
     max_length=2000,
     max_input_chars=400,
     max_expected_chars=250,
@@ -216,6 +216,9 @@ def format_test_feedback(
     else:
         if sort_test_cases_by_length:
             failing = sorted(failing, key=lambda x: len(str(x["input"])) + len(str(x["actual"])))
+        else:
+            # Sort by test index so the first failing test (most diagnostic) is shown first
+            failing = sorted(failing, key=lambda x: x["test_idx"])
         if max_tests_to_show is not None:
             failing = failing[: int(max_tests_to_show)]
 
@@ -223,6 +226,49 @@ def format_test_feedback(
         return ""
 
     parts = []
+
+    # --- Trajectory context: summarise pass/fail boundary and error growth ---
+    passing = [r for r in records if r["passed"]]
+    n_pass = len(passing)
+    n_total = len(records)
+    first_fail_idx = failing[0]["test_idx"] + 1  # 1-indexed
+
+    # Extract t values for passing and failing tests to describe the boundary
+    def _extract_t(record):
+        m = re.search(r'predict_position\(([^)]+)\)', record.get("input", ""))
+        return float(m.group(1)) if m else None
+
+    pass_t_vals = sorted([_extract_t(r) for r in passing if _extract_t(r) is not None])
+    fail_t_vals = sorted([_extract_t(r) for r in records if not r["passed"] and _extract_t(r) is not None])
+
+    parts.append(f"Passed {n_pass}/{n_total} test cases.")
+    if pass_t_vals and fail_t_vals:
+        parts.append(
+            f"Tests pass for t <= {pass_t_vals[-1]:.2f}, first failure at t = {fail_t_vals[0]:.2f} (Test Case {first_fail_idx})."
+        )
+
+    # Detect error growth: extract avg_distance from WrongAnswer failing records
+    wa_distances = []
+    for r in records:
+        if r["passed"]:
+            continue
+        actual = r.get("actual", "")
+        if isinstance(actual, str) and actual.startswith("WrongAnswer:"):
+            dm = re.search(r'avg_distance=([\d.]+)', actual)
+            t_val = _extract_t(r)
+            if dm and t_val is not None:
+                wa_distances.append((t_val, float(dm.group(1))))
+    if len(wa_distances) >= 2:
+        wa_distances.sort()
+        first_dist = wa_distances[0][1]
+        last_dist = wa_distances[-1][1]
+        if last_dist > first_dist * 2:
+            parts.append(
+                f"Position error grows with time (avg_distance {first_dist:.0f} at t={wa_distances[0][0]:.2f}"
+                f" -> {last_dist:.0f} at t={wa_distances[-1][0]:.2f}),"
+                f" suggesting collision/bounce handling may be incorrect."
+            )
+    parts.append("")
 
     def _render_debug_block(dbg_text):
         dbg = (dbg_text or "").strip()
@@ -289,10 +335,27 @@ def format_test_feedback(
             # Per-ball breakdown (remaining lines)
             if len(wa_lines) > 1:
                 parts.append("Per-Ball Distances")
+                ball_dists = []
                 for line in wa_lines[1:]:
                     if line.strip():
                         parts.append(_truncate_str(line, max_actual_chars))
+                        bdm = re.search(r'off by ([\d.]+)m', line)
+                        if bdm:
+                            ball_dists.append(float(bdm.group(1)))
                 parts.append("")
+                # Detect missed-bounce pattern: some balls accurate, others wildly off
+                if ball_dists:
+                    min_bd, max_bd = min(ball_dists), max(ball_dists)
+                    if max_bd > 100 and min_bd < 10:
+                        parts.append(
+                            "Hint: Some balls are nearly correct while others are far off. "
+                            "This usually means certain balls missed a wall collision "
+                            "(they traveled in a straight line through the wall). "
+                            "Check that collision detection tests the ball against every "
+                            "container edge and that the collision point lies on the "
+                            "finite edge segment, not the infinite line extension."
+                        )
+                        parts.append("")
             _render_debug_block(debug_text)
         else:
             parts.append(f"Test Case {test_idx}: Wrong Answer")

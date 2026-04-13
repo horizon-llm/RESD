@@ -24,10 +24,10 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo/datasets/sudoku --num_data $NUM_DATA
+python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
 
-train_path=selfevolve/sdpo/datasets/sudoku/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/sudoku/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/sudoku/test.parquet
 
 ########################### Quick Config ###########################
 

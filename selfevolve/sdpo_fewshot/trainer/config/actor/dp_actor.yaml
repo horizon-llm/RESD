@@ -20,7 +20,7 @@ defaults:
   - _self_
 
 # Target class for this configuration
-_target_: selfevolve.sdpo_migrate.workers.config.FSDPActorConfig
+_target_: selfevolve.sdpo_fewshot.workers.config.FSDPActorConfig
 
 # TODO(haibin.lin): switch to fsdp2
 strategy: fsdp

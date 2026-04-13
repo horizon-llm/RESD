@@ -13,6 +13,7 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
+# export NCCL_SOCKET_IFNAME=eth0
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
@@ -21,20 +22,21 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 ########################### Data Preprocess ###########################
 
-CONFIG_NAME="sdpo"
+CONFIG_NAME="rlsd"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
-    --data_source bouncingsim/bouncingsim-MULTIOBJ-medium \
+python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
+    --train_data_source manufactoria/has_train \
+    --test_data_source manufactoria/has_test \
     --num_data ${NUM_DATA} \
-    --data_source_suffix "multiobj_medium"
+    --data_source_suffix "has"
 
-train_path=selfevolve/sdpo/datasets/bouncingsim/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/bouncingsim/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/manufactoria/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=bouncingsim
+TASK=manufactoria
 export TASK
 
 # === optim ===
@@ -43,34 +45,24 @@ ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
 LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-NUM_EPOCHS=${NUM_EPOCHS:-4}
+NUM_EPOCHS=${NUM_EPOCHS:-3}
 # === model ===
+FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"} # "fsdp" or "fsdp2"
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
 ENABLE_THINKING=True
+# === RLSD-specific ===
+RLSD_LAMBDA_INIT=${RLSD_LAMBDA_INIT:-0.5}      # initial mixing coefficient for token-level credit
+RLSD_LAMBDA_FINAL=${RLSD_LAMBDA_FINAL:-0.0}    # final mixing coefficient (decays linearly)
+RLSD_WARMDOWN_STEPS=${RLSD_WARMDOWN_STEPS:-50}  # steps over which lambda decays
+RLSD_EPSILON_W=${RLSD_EPSILON_W:-0.2}           # clip range for evidence weights w_t
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
-success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
-# === distillation objective ===
-ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
-DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
-remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
-distillation_top_p=${distillation_top_p:-null}
-distillation_max_k=${distillation_max_k:-null} # maximum number of tokens to keep when using top-p (memory cap); null means no limit
-distillation_token_selector=${distillation_token_selector:-"student"} # "student": use student's topk/top-p as support; "teacher": use teacher's topk/top-p as support; "union": use the union of student and teacher support
-teacher_prob_min_ratio=${teacher_prob_min_ratio:-0.2} # Clamp teacher prob to be at least this proportion of student prob; null disables
-teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
-position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
-position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True
-entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] fraction of tokens to keep per sequence by (teacher_H - student_H); null disables
-entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
-entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
-entropy_gt_filter=${entropy_gt_filter:-False} # whether to apply hard filter where teacher_entropy > student_entropy
 # === context updater ===
 use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
@@ -86,7 +78,7 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/manufactoria_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
 student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
 student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
@@ -96,42 +88,27 @@ feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher f
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_bouncingsim'
+project_name='rlsd_manufactoria'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_30b_fsdp"
+exp_name="qwen3_4b_$FSDP_STRATEGY"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
 _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
 _add maxrp   "$MAX_REPROMPT_LENGTH"        49152
-_add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
-_add lr      "$LR"                         1e-5
-_add ema     "$EMA_WEIGHT"                 0.05
+_add lr      "$LR"                         1e-6
+_add ema     "$EMA_WEIGHT"                 0.01
 _add envonly "$ENV_ONLY_WHEN_NO_SOLUTION"  True
-_add distk   "$DISTILLATION_TOPK"          100
-_add distp   "$distillation_top_p"         null
-_add distmk  "$distillation_max_k"         null
-_add distts  "$distillation_token_selector" student
-_add tpmin   "$teacher_prob_min_ratio"     null
-_add tpmax   "$teacher_prob_max_ratio"     null
-_add pwe     "$position_weighting_enabled" False
-_add pwb     "$position_weighting_beta"    1.0
-_add edfr    "$entropy_diff_filter_ratio"  null
-_add efr     "$entropy_filter_ratio"      null
-_add efc     "$entropy_filter_criterion"  diff
-_add egf     "$entropy_gt_filter"         False
 _add think   "$ENABLE_THINKING"            True
-_add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
-_add sct      "$success_reward_threshold"  0.5
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -153,6 +130,10 @@ _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 _add sparse  "$sparse_rewards"             False
+_add rlinit  "$RLSD_LAMBDA_INIT"           0.5
+_add rlfin   "$RLSD_LAMBDA_FINAL"          0.0
+_add rlwd    "$RLSD_WARMDOWN_STEPS"        50
+_add rlepsw  "$RLSD_EPSILON_W"             0.2
 
 ########################### Sync Results ###########################
 
@@ -202,17 +183,18 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/bouncingsim.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/manufactoria.py
     custom_reward_function.name=compute_score
     +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Thinking-2507
+    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 
 ACTOR=(
+    actor_rollout_ref.actor.strategy=$FSDP_STRATEGY
     actor_rollout_ref.actor.optim.lr=$LR
     actor_rollout_ref.actor.ppo_mini_batch_size=32
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
@@ -220,31 +202,20 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
-    actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
 DISTILLATION=(
-    actor_rollout_ref.actor.self_distillation.distillation_topk=$DISTILLATION_TOPK
     actor_rollout_ref.actor.self_distillation.dont_reprompt_on_self_success=${DONTS_REPROMPT_ON_SELF_SUCCESS}
-    actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
     actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
-    actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
     actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=${remove_thinking_from_demonstration}
-    actor_rollout_ref.actor.self_distillation.distillation_top_p=${distillation_top_p}
-    actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
-    actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
     actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
-    actor_rollout_ref.actor.self_distillation.success_reward_threshold=${success_reward_threshold}
-    actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
-    actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
-    actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
-    actor_rollout_ref.actor.self_distillation.position_weighting_beta=${position_weighting_beta}
-    actor_rollout_ref.actor.self_distillation.entropy_diff_filter_ratio=${entropy_diff_filter_ratio}
-    actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
-    actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
-    actor_rollout_ref.actor.self_distillation.entropy_gt_filter=${entropy_gt_filter}
+    # RLSD-specific
+    actor_rollout_ref.actor.self_distillation.rlsd_lambda_init=${RLSD_LAMBDA_INIT}
+    actor_rollout_ref.actor.self_distillation.rlsd_lambda_final=${RLSD_LAMBDA_FINAL}
+    actor_rollout_ref.actor.self_distillation.rlsd_lambda_warmdown_steps=${RLSD_WARMDOWN_STEPS}
+    actor_rollout_ref.actor.self_distillation.rlsd_epsilon_w=${RLSD_EPSILON_W}
 )
 
 CONTEXT_UPDATER=(
@@ -305,7 +276,7 @@ TRAINER=(
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
-    trainer.nnodes=2
+    trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=8
     trainer.test_freq=8

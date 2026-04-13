@@ -1510,6 +1510,51 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_metrics
 
 
+def compute_rlsd_token_advantages(
+    advantages: torch.Tensor,
+    teacher_log_prob: torch.Tensor,
+    student_log_prob: torch.Tensor,
+    response_mask: torch.Tensor,
+    lambda_mix: float,
+    epsilon_w: float = 0.2,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute RLSD token-level weighted advantages (Self-Distilled RLVR, arXiv:2604.03128).
+
+    Args:
+        advantages: GRPO sequence-level advantages broadcast across tokens, shape (bs, seq_len).
+        teacher_log_prob: log P_T(y_t) from teacher (conditioned on privileged info), shape (bs, seq_len). Detached.
+        student_log_prob: log P_S(y_t) from student (no privileged info), shape (bs, seq_len). Detached.
+        response_mask: binary mask, shape (bs, seq_len).
+        lambda_mix: mixing coefficient in [0, 1]. When 0, falls back to uniform GRPO advantages.
+        epsilon_w: clip range for evidence weights w_t.
+
+    Returns:
+        rlsd_advantages: token-level weighted advantages, shape (bs, seq_len).
+        metrics: dict of scalar metrics for logging.
+    """
+    with torch.no_grad():
+        # Privileged information gain: Δ_t = log P_T(y_t) - log P_S(y_t)
+        delta_t = teacher_log_prob - student_log_prob
+
+        # Direction-aware evidence reweighting: w_t = exp(sign(A) · Δ_t)
+        sign_A = torch.sign(advantages)
+        w_t = torch.exp(sign_A * delta_t)
+
+        # Clipped credit assignment: Â_t = A · ((1 - λ) + λ · clip(w_t, 1 - ε_w, 1 + ε_w))
+        w_t_clipped = torch.clamp(w_t, 1.0 - epsilon_w, 1.0 + epsilon_w)
+        rlsd_advantages = advantages * ((1.0 - lambda_mix) + lambda_mix * w_t_clipped)
+
+    mask_sum = response_mask.sum().clamp(min=1)
+    metrics = {
+        "rlsd/delta_t_mean": (delta_t * response_mask).sum().item() / mask_sum.item(),
+        "rlsd/w_t_mean": (w_t * response_mask).sum().item() / mask_sum.item(),
+        "rlsd/w_t_clip_frac": ((w_t != w_t_clipped).float() * response_mask).sum().item() / mask_sum.item(),
+        "rlsd/lambda": lambda_mix,
+    }
+
+    return rlsd_advantages, metrics
+
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,

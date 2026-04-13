@@ -1,0 +1,42 @@
+defaults:
+  - ppo_trainer
+  - user
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+max_model_len: 32768
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 32
+    policy_loss:
+      loss_mode: rlsd
+    self_distillation:
+      max_reprompt_len: 10240
+      teacher:
+        max_tokens: 32768
+        max_feedback_prompt_len: 32768
+    optim:
+      lr: 1e-6
+  rollout:
+    n: 8
+    calculate_log_probs: True
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: True
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+custom_reward_function:
+  reward_kwargs: {}
+
+data:
+  train_batch_size: 32
+
+trainer:
+  val_before_train: True

@@ -13,34 +13,37 @@ export PYTHONUNBUFFERED=1
 # Add repo root to PYTHONPATH so `selfevolve.sdpo` is importable as a package.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONSAFEPATH=1
-# export RAY_DEBUG="legacy"
 ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
-########################### Quick Config ###########################
+########################### Data Preprocess ###########################
 
 CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1}
+NUM_DATA=${NUM_DATA:-320}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
+    --data_source bouncingsim/bouncingsim-MULTIOBJ-easy \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "multiobj_easy"
 
-train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo_fewshot/datasets/sudoku/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=sudoku
+TASK=bouncingsim_multiobj_easy
 export TASK
 
 # === optim ===
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
-ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
 LR=${LR:-5e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
+NUM_EPOCHS=${NUM_EPOCHS:-4}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
@@ -52,6 +55,7 @@ ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only u
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
+success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
 # === distillation objective ===
 ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
@@ -82,32 +86,30 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sudoku_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
 student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
 student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
 # === teacher ===
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
-# === stream trainer ===
-max_updates_per_batch=${max_updates_per_batch:-8}
-min_updates_per_batch=${min_updates_per_batch:-8}
-early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
+# === reward function ===
+sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_stream_sudoku'
+project_name='sdpo_bouncingsim_multiobj_easy'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_fsdp"
+exp_name="qwen3_30b_fsdp"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
 _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
+_add maxrp   "$MAX_REPROMPT_LENGTH"        49152
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -129,6 +131,7 @@ _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
+_add sct      "$success_reward_threshold"  0.5
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -149,9 +152,7 @@ _add stusync "$student_playbook_sync_frequency"  null
 _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
-_add mupb    "$max_updates_per_batch"      4
-_add minupb  "$min_updates_per_batch"      1
-_add esith   "$early_stop_improvement_threshold" 0.0
+_add sparse  "$sparse_rewards"             False
 
 ########################### Sync Results ###########################
 
@@ -201,12 +202,13 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/reasoning_gym_games/__init__.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/bouncingsim.py
     custom_reward_function.name=compute_score
+    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
+    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Thinking-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 
@@ -234,6 +236,7 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
     actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
     actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
+    actor_rollout_ref.actor.self_distillation.success_reward_threshold=${success_reward_threshold}
     actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
@@ -278,7 +281,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.55
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
     actor_rollout_ref.rollout.max_model_len=74752
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
@@ -297,20 +300,15 @@ ALGORITHM=(
 )
 
 TRAINER=(
-    trainer.use_stream_trainer=True
-    trainer.max_updates_per_batch=${max_updates_per_batch}
-    trainer.min_updates_per_batch=${min_updates_per_batch}
-    trainer.early_stop_improvement_threshold=${early_stop_improvement_threshold}
     trainer.logger='["console","wandb"]'
-    trainer.total_epochs=1
+    trainer.total_epochs=${NUM_EPOCHS}
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
-    trainer.nnodes=1
+    trainer.nnodes=2
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=2
-    trainer.test_freq=2
-    trainer.forget_eval.eval_freq=0
+    trainer.save_freq=8
+    trainer.test_freq=8
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"
     trainer.validation_data_dir="checkpoints/${project_name}/${exp_name}/val_generations"

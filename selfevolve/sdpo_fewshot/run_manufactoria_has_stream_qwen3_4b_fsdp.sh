@@ -31,8 +31,8 @@ python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
     --num_data ${NUM_DATA} \
     --data_source_suffix "has"
 
-train_path=selfevolve/sdpo/datasets/manufactoria/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo/datasets/manufactoria/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/manufactoria/test.parquet
 
 ########################### Quick Config ###########################
 
