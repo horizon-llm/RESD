@@ -50,7 +50,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-58368}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
@@ -106,7 +106,7 @@ project_name='sdpo_stream_bouncingsim'
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_fsdp"
+exp_name="qwen3_4b_fsdp_getsolutionv2"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
@@ -224,7 +224,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=74752
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=83968
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -286,7 +286,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.55
-    actor_rollout_ref.rollout.max_model_len=74752
+    actor_rollout_ref.rollout.max_model_len=83968
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95

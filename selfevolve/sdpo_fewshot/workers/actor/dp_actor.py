@@ -933,184 +933,193 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
-                    teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
-                    if teacher_regularization == "trust-region" and self.use_fused_kernels:
-                        raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
-                    # Determine distillation subset mode
-                    distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
-                    distill_top_p = self_distillation_cfg.distillation_top_p if self_distillation_cfg.full_logit_distillation else None
-                    distill_max_k = self_distillation_cfg.distillation_max_k
-                    uses_subset = distill_topk is not None or distill_top_p is not None
-                    return_all_logps = self_distillation_cfg.full_logit_distillation and not uses_subset
-                    token_selector = self_distillation_cfg.distillation_token_selector
-                    _LOG_PROB_FLOOR = -1e4
-                    _VALID_TOPK_THRESHOLD = -5e4
-
-                    # Common kwargs for the subset-discovery forward pass
-                    _discover_kwargs = dict(
-                        distill_topk=distill_topk, distill_top_p=distill_top_p,
-                        distill_max_k=distill_max_k,
-                    )
-
-                    teacher_inputs = {
-                        "responses": model_inputs["responses"],
-                        "input_ids": model_inputs["teacher_input_ids"],
-                        "attention_mask": model_inputs["teacher_attention_mask"],
-                        "position_ids": model_inputs["teacher_position_ids"],
-                    }
-                    teacher_model = self.teacher_module or self.actor_module
-                    if teacher_regularization == "trust-region" and (
-                        self.teacher_module is None or self.teacher_module is self.actor_module
-                    ):
-                        raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
-
-                    if rlsd_enabled:
-                        # RLSD only needs per-token log probs, skip full-logit/topk/union logic
+                    if not self_distillation_enabled:
+                        # Simple forward pass for vanilla / non-distillation mode
                         outputs = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                         )
                         log_prob = outputs["log_probs"]
                         entropy = outputs["entropys"] if calculate_entropy else None
 
-                        with torch.no_grad():
-                            teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs, temperature=temperature, calculate_entropy=False,
-                                module=teacher_model,
+                    if self_distillation_enabled:
+                        teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
+                        if teacher_regularization == "trust-region" and self.use_fused_kernels:
+                            raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
+                        # Determine distillation subset mode
+                        distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
+                        distill_top_p = self_distillation_cfg.distillation_top_p if self_distillation_cfg.full_logit_distillation else None
+                        distill_max_k = self_distillation_cfg.distillation_max_k
+                        uses_subset = distill_topk is not None or distill_top_p is not None
+                        return_all_logps = self_distillation_cfg.full_logit_distillation and not uses_subset
+                        token_selector = self_distillation_cfg.distillation_token_selector
+                        _LOG_PROB_FLOOR = -1e4
+                        _VALID_TOPK_THRESHOLD = -5e4
+
+                        # Common kwargs for the subset-discovery forward pass
+                        _discover_kwargs = dict(
+                            distill_topk=distill_topk, distill_top_p=distill_top_p,
+                            distill_max_k=distill_max_k,
+                        )
+
+                        teacher_inputs = {
+                            "responses": model_inputs["responses"],
+                            "input_ids": model_inputs["teacher_input_ids"],
+                            "attention_mask": model_inputs["teacher_attention_mask"],
+                            "position_ids": model_inputs["teacher_position_ids"],
+                        }
+                        teacher_model = self.teacher_module or self.actor_module
+                        if teacher_regularization == "trust-region" and (
+                            self.teacher_module is None or self.teacher_module is self.actor_module
+                        ):
+                            raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
+
+                        if rlsd_enabled:
+                            # RLSD only needs per-token log probs, skip full-logit/topk/union logic
+                            outputs = self._forward_micro_batch(
+                                model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                             )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_entropy = None
-                        # Set unused variables to None for consistency
-                        student_all_logps = None
-                        teacher_all_logps = None
-                        student_topk_logps = None
-                        teacher_topk_logps = None
-                        student_topk_indices = None
+                            log_prob = outputs["log_probs"]
+                            entropy = outputs["entropys"] if calculate_entropy else None
 
-                    elif token_selector == "student":
-                        # Student discovers indices, teacher gathers at those indices
-                        outputs = self._forward_micro_batch(
-                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
-                            return_all_logps=return_all_logps, **_discover_kwargs,
-                        )
-                        log_prob = outputs["log_probs"]
-                        entropy = outputs["entropys"] if calculate_entropy else None
-                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
-                        student_topk_indices = outputs.get("topk_indices") if uses_subset else None
+                            with torch.no_grad():
+                                teacher_outputs = self._forward_micro_batch(
+                                    teacher_inputs, temperature=temperature, calculate_entropy=False,
+                                    module=teacher_model,
+                                )
+                            teacher_log_prob = teacher_outputs["log_probs"]
+                            teacher_entropy = None
+                            # Set unused variables to None for consistency
+                            student_all_logps = None
+                            teacher_all_logps = None
+                            student_topk_logps = None
+                            teacher_topk_logps = None
+                            student_topk_indices = None
 
-                        with torch.no_grad():
-                            teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs, temperature=temperature, calculate_entropy=True,
+                        elif token_selector == "student":
+                            # Student discovers indices, teacher gathers at those indices
+                            outputs = self._forward_micro_batch(
+                                model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
+                                return_all_logps=return_all_logps, **_discover_kwargs,
+                            )
+                            log_prob = outputs["log_probs"]
+                            entropy = outputs["entropys"] if calculate_entropy else None
+                            student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                            student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                            student_topk_indices = outputs.get("topk_indices") if uses_subset else None
+
+                            with torch.no_grad():
+                                teacher_outputs = self._forward_micro_batch(
+                                    teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                    return_all_logps=return_all_logps,
+                                    distill_topk=distill_topk, distill_top_p=distill_top_p,
+                                    distill_max_k=distill_max_k,
+                                    topk_indices=student_topk_indices,
+                                    module=teacher_model,
+                                )
+                            teacher_log_prob = teacher_outputs["log_probs"]
+                            teacher_entropy = teacher_outputs.get("entropys")
+                            teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                            teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                            if (
+                                uses_subset
+                                and distill_top_p is not None
+                                and student_topk_logps is not None
+                                and teacher_topk_logps is not None
+                            ):
+                                valid_mask = student_topk_logps > _VALID_TOPK_THRESHOLD
+                                teacher_topk_logps = teacher_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+
+                        elif token_selector == "teacher":
+                            # Teacher discovers indices first, student gathers at those indices
+                            with torch.no_grad():
+                                teacher_outputs = self._forward_micro_batch(
+                                    teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                    return_all_logps=return_all_logps, **_discover_kwargs,
+                                    module=teacher_model,
+                                )
+                            teacher_log_prob = teacher_outputs["log_probs"]
+                            teacher_entropy = teacher_outputs.get("entropys")
+                            teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                            teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                            teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
+
+                            outputs = self._forward_micro_batch(
+                                model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                                 return_all_logps=return_all_logps,
                                 distill_topk=distill_topk, distill_top_p=distill_top_p,
                                 distill_max_k=distill_max_k,
-                                topk_indices=student_topk_indices,
-                                module=teacher_model,
+                                topk_indices=teacher_topk_indices,
                             )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_entropy = teacher_outputs.get("entropys")
-                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
-                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
-                        if (
-                            uses_subset
-                            and distill_top_p is not None
-                            and student_topk_logps is not None
-                            and teacher_topk_logps is not None
-                        ):
-                            valid_mask = student_topk_logps > _VALID_TOPK_THRESHOLD
-                            teacher_topk_logps = teacher_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+                            log_prob = outputs["log_probs"]
+                            entropy = outputs["entropys"] if calculate_entropy else None
+                            student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                            student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                            student_topk_indices = teacher_topk_indices  # same indices for both
+                            if (
+                                uses_subset
+                                and distill_top_p is not None
+                                and teacher_topk_logps is not None
+                                and student_topk_logps is not None
+                            ):
+                                valid_mask = teacher_topk_logps > _VALID_TOPK_THRESHOLD
+                                student_topk_logps = student_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
 
-                    elif token_selector == "teacher":
-                        # Teacher discovers indices first, student gathers at those indices
-                        with torch.no_grad():
-                            teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs, temperature=temperature, calculate_entropy=True,
-                                return_all_logps=return_all_logps, **_discover_kwargs,
-                                module=teacher_model,
-                            )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_entropy = teacher_outputs.get("entropys")
-                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
-                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
-                        teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
-
-                        outputs = self._forward_micro_batch(
-                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
-                            return_all_logps=return_all_logps,
-                            distill_topk=distill_topk, distill_top_p=distill_top_p,
-                            distill_max_k=distill_max_k,
-                            topk_indices=teacher_topk_indices,
-                        )
-                        log_prob = outputs["log_probs"]
-                        entropy = outputs["entropys"] if calculate_entropy else None
-                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
-                        student_topk_indices = teacher_topk_indices  # same indices for both
-                        if (
-                            uses_subset
-                            and distill_top_p is not None
-                            and teacher_topk_logps is not None
-                            and student_topk_logps is not None
-                        ):
-                            valid_mask = teacher_topk_logps > _VALID_TOPK_THRESHOLD
-                            student_topk_logps = student_topk_logps.masked_fill(~valid_mask, _LOG_PROB_FLOOR)
-
-                    elif token_selector == "union":
-                        # Both discover independently, then merge index sets
-                        need_logits = uses_subset
-                        outputs = self._forward_micro_batch(
-                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
-                            return_all_logps=return_all_logps, **_discover_kwargs,
-                            return_response_logits=need_logits,
-                        )
-                        log_prob = outputs["log_probs"]
-                        entropy = outputs["entropys"] if calculate_entropy else None
-                        student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                        student_topk_logps = outputs.get("topk_logps") if uses_subset else None
-                        student_topk_indices = outputs.get("topk_indices") if uses_subset else None
-                        student_response_logits = outputs.get("response_logits")
-
-                        with torch.no_grad():
-                            teacher_outputs = self._forward_micro_batch(
-                                teacher_inputs, temperature=temperature, calculate_entropy=True,
+                        elif token_selector == "union":
+                            # Both discover independently, then merge index sets
+                            need_logits = uses_subset
+                            outputs = self._forward_micro_batch(
+                                model_inputs, temperature=temperature, calculate_entropy=calculate_entropy,
                                 return_all_logps=return_all_logps, **_discover_kwargs,
                                 return_response_logits=need_logits,
-                                module=teacher_model,
                             )
-                        teacher_log_prob = teacher_outputs["log_probs"]
-                        teacher_entropy = teacher_outputs.get("entropys")
-                        teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
-                        teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
-                        teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
-                        teacher_response_logits = teacher_outputs.get("response_logits")
+                            log_prob = outputs["log_probs"]
+                            entropy = outputs["entropys"] if calculate_entropy else None
+                            student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                            student_topk_logps = outputs.get("topk_logps") if uses_subset else None
+                            student_topk_indices = outputs.get("topk_indices") if uses_subset else None
+                            student_response_logits = outputs.get("response_logits")
 
-                        # Merge index sets and re-gather log probs at union indices
-                        if uses_subset and student_topk_indices is not None and teacher_topk_indices is not None:
-                            union_indices, valid_mask = _merge_topk_indices(
-                                student_topk_indices, teacher_topk_indices,
+                            with torch.no_grad():
+                                teacher_outputs = self._forward_micro_batch(
+                                    teacher_inputs, temperature=temperature, calculate_entropy=True,
+                                    return_all_logps=return_all_logps, **_discover_kwargs,
+                                    return_response_logits=need_logits,
+                                    module=teacher_model,
+                                )
+                            teacher_log_prob = teacher_outputs["log_probs"]
+                            teacher_entropy = teacher_outputs.get("entropys")
+                            teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
+                            teacher_topk_logps = teacher_outputs.get("topk_logps") if uses_subset else None
+                            teacher_topk_indices = teacher_outputs.get("topk_indices") if uses_subset else None
+                            teacher_response_logits = teacher_outputs.get("response_logits")
+
+                            # Merge index sets and re-gather log probs at union indices
+                            if uses_subset and student_topk_indices is not None and teacher_topk_indices is not None:
+                                union_indices, valid_mask = _merge_topk_indices(
+                                    student_topk_indices, teacher_topk_indices,
+                                )
+                                # Gather logits at union indices from both models
+                                student_union_logits = torch.gather(
+                                    student_response_logits, dim=-1, index=union_indices,
+                                )
+                                teacher_union_logits = torch.gather(
+                                    teacher_response_logits, dim=-1, index=union_indices,
+                                )
+                                # Compute logsumexp from full logits for proper normalization
+                                student_lse = torch.logsumexp(student_response_logits, dim=-1, keepdim=True)
+                                teacher_lse = torch.logsumexp(teacher_response_logits, dim=-1, keepdim=True)
+                                del student_response_logits, teacher_response_logits
+                                # Convert to log probs and mask invalid (dedup-padded) positions.
+                                # Use a large finite negative instead of -inf so that KL backward
+                                # computes exp(-1e4)*(finite) ≈ 0 rather than exp(-inf)*NaN = NaN.
+                                _LOG_PROB_FLOOR = -1e4
+                                student_topk_logps = (student_union_logits - student_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+                                teacher_topk_logps = (teacher_union_logits - teacher_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
+                                student_topk_indices = union_indices
+                        else:
+                            raise ValueError(
+                                f"Unknown distillation_token_selector: {token_selector}"
                             )
-                            # Gather logits at union indices from both models
-                            student_union_logits = torch.gather(
-                                student_response_logits, dim=-1, index=union_indices,
-                            )
-                            teacher_union_logits = torch.gather(
-                                teacher_response_logits, dim=-1, index=union_indices,
-                            )
-                            # Compute logsumexp from full logits for proper normalization
-                            student_lse = torch.logsumexp(student_response_logits, dim=-1, keepdim=True)
-                            teacher_lse = torch.logsumexp(teacher_response_logits, dim=-1, keepdim=True)
-                            del student_response_logits, teacher_response_logits
-                            # Convert to log probs and mask invalid (dedup-padded) positions.
-                            # Use a large finite negative instead of -inf so that KL backward
-                            # computes exp(-1e4)*(finite) ≈ 0 rather than exp(-inf)*NaN = NaN.
-                            _LOG_PROB_FLOOR = -1e4
-                            student_topk_logps = (student_union_logits - student_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
-                            teacher_topk_logps = (teacher_union_logits - teacher_lse).masked_fill(~valid_mask, _LOG_PROB_FLOOR)
-                            student_topk_indices = union_indices
-                    else:
-                        raise ValueError(
-                            f"Unknown distillation_token_selector: {token_selector}"
-                        )
 
                     # for fully_async_policy
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
@@ -1217,6 +1226,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 _student_entropy_values.append(entropy.detach()[_ent_mask_bool].cpu().numpy())
                             if teacher_entropy is not None:
                                 _teacher_entropy_values.append(teacher_entropy.detach()[_ent_mask_bool].cpu().numpy())
+                        _clipped_p_ratio = pg_metrics.pop("clipped_p_ratio", None)
                         micro_batch_metrics.update(pg_metrics)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
@@ -1325,6 +1335,33 @@ class DataParallelPPOActor(BasePPOActor):
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
+
+                    if self_distillation_enabled and not rlsd_enabled:
+                        _clipped_log_ratio = _clipped_p_ratio
+                        if _clipped_log_ratio is not None:
+                            _ratio_mask = response_mask.bool()
+                            if self_distillation_mask is not None:
+                                _ratio_mask = _ratio_mask & self_distillation_mask.bool().unsqueeze(-1)
+                            if _clipped_log_ratio.dim() == 3:
+                                _valid = _ratio_mask.unsqueeze(-1).expand_as(_clipped_log_ratio)
+                                _valid = _valid & (_clipped_log_ratio.abs() < 5e3)
+                                _flat_log_ratio = _clipped_log_ratio[_valid]
+                            else:
+                                _flat_log_ratio = _clipped_log_ratio[_ratio_mask]
+                            if _flat_log_ratio.numel() > 0:
+                                _ratio = _flat_log_ratio.exp().clamp(max=1e4)
+                                micro_batch_metrics["actor/p_ratio/mean"] = _ratio.mean().item()
+                                micro_batch_metrics["actor/p_ratio/max"] = _ratio.max().item()
+                                micro_batch_metrics["actor/p_ratio/min"] = _ratio.min().item()
+                                micro_batch_metrics["actor/p_ratio/median"] = _ratio.median().item()
+                                micro_batch_metrics["actor/p_ratio/std"] = _ratio.std().item()
+                                _encourage = _ratio[_ratio > 1.0]
+                                _discourage = _ratio[_ratio <= 1.0]
+                                micro_batch_metrics["actor/p_ratio/encourage_frac"] = _encourage.numel() / _ratio.numel()
+                                if _encourage.numel() > 0:
+                                    micro_batch_metrics["actor/p_ratio/encourage_mean"] = _encourage.mean().item()
+                                if _discourage.numel() > 0:
+                                    micro_batch_metrics["actor/p_ratio/discourage_mean"] = _discourage.mean().item()
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)

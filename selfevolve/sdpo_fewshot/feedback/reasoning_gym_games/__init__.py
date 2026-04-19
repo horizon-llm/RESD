@@ -62,9 +62,14 @@ def extract_answer(solution_str: str) -> tuple[str, bool]:
     return solution_str.strip(), False
 
 
-def wrap_score(score_fn, solution_str, ground_truth, extra_info=None):
+def wrap_score(score_fn, solution_str, ground_truth, extra_info=None, sparse_rewards=False):
     """Shared wrapper: extract answer, reconstruct entry, call score_fn, return standard dict."""
     was_truncated = extra_info.get("truncated", False) if extra_info else False
+    split = extra_info.get("split", "train") if extra_info else "train"
+
+    # Test split always uses dense (partial-credit) rewards for faithful evaluation.
+    if split == "test":
+        sparse_rewards = False
 
     answer, used_boxed = extract_answer(solution_str)
 
@@ -102,6 +107,9 @@ def wrap_score(score_fn, solution_str, ground_truth, extra_info=None):
         task_feedback = ""
 
     acc = 1.0 if rg_score >= 1.0 else 0.0
+
+    if sparse_rewards:
+        rg_score = acc
 
     feedback_parts = []
     if was_truncated:
@@ -188,7 +196,7 @@ def _ensure_registry():
     _TASK_REGISTRY["mahjong_puzzle"] = default_score_answer
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, sparse_rewards=False, **kwargs):
     """Main dispatcher: route to per-task scoring based on source_dataset."""
     _ensure_registry()
 
@@ -196,6 +204,6 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kw
     source_dataset = metadata.get("source_dataset", "")
 
     score_fn = _TASK_REGISTRY.get(source_dataset, default_score_answer)
-    result = wrap_score(score_fn, solution_str, ground_truth, extra_info)
+    result = wrap_score(score_fn, solution_str, ground_truth, extra_info, sparse_rewards=sparse_rewards)
     print(f"[REWARD] data_source={data_source}, task={source_dataset}, score={result['score']}, acc={result['acc']}", flush=True)
     return result

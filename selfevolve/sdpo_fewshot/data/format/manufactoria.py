@@ -97,8 +97,8 @@ def run_proprocessing(train_data_source, test_data_source, data_source_suffix, n
     test_ds = _map_in_shards(test_dataset, "test", num_shards=num_shards, num_proc=num_proc, data_source_suffix=data_source_suffix)
     print(test_ds)
 
-    out_train = os.path.join("selfevolve/sdpo/datasets/manufactoria", f"train_{num_data}.parquet")
-    out_test  = os.path.join("selfevolve/sdpo/datasets/manufactoria", "test.parquet")
+    out_train = os.path.join("selfevolve/sdpo_fewshot/datasets/manufactoria", f"train_{num_data}.parquet")
+    out_test  = os.path.join("selfevolve/sdpo_fewshot/datasets/manufactoria", "test.parquet")
     os.makedirs(os.path.dirname(out_train), exist_ok=True)
     write_rowgrouped_large(train_ds, out_train)
     write_rowgrouped_large(test_ds, out_test)

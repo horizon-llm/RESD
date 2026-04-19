@@ -76,11 +76,14 @@ def _map_in_shards(dataset, split: str, num_shards: int, num_proc: int, data_sou
     return datasets.concatenate_datasets(processed_shards)
 
 
-def run_proprocessing(data_source, data_source_suffix, num_proc=4, num_data=-1):
+def run_proprocessing(data_source, data_source_suffix, num_proc=4, num_data=-1, shuffle=False, seed=42):
     print("Train data source: ", data_source)
     print("Test data source: ", data_source)
     train_dataset = datasets.load_dataset(data_source, split="train")
     test_dataset = datasets.load_dataset(data_source, split="test")
+    if shuffle:
+        train_dataset = train_dataset.shuffle(seed=seed)
+        test_dataset = test_dataset.shuffle(seed=seed)
     if num_data != -1:
         train_dataset = train_dataset.select(range(min(num_data, len(train_dataset))))
 
@@ -119,6 +122,14 @@ if __name__ == "__main__":
         default="",
         help="Suffix appended to the dataset name to form the data_source field."
     )
+    parser.add_argument(
+        "--shuffle", action="store_true", default=False,
+        help="Shuffle the data before postprocessing and truncation (default: False)."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for shuffling (default: 42)."
+    )
     args = parser.parse_args()
 
-    run_proprocessing(data_source=args.data_source, data_source_suffix=args.data_source_suffix, num_data=args.num_data)
+    run_proprocessing(data_source=args.data_source, data_source_suffix=args.data_source_suffix, num_data=args.num_data, shuffle=args.shuffle, seed=args.seed)

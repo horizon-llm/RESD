@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import asyncio
+import base64
 import re
+import sys
 import traceback
 from pathlib import Path
 from typing import Annotated, Optional
@@ -122,8 +124,20 @@ help_doc = """
 - `s`: switch display mode
   - plain text
   - rich table
+- `c`: copy current sample to clipboard
+- `C`: copy a single field (prompted)
 
 """
+
+
+def osc52_copy(text: str) -> None:
+    """Copy text to the local clipboard via OSC 52 terminal escape sequence.
+
+    Works over SSH as the escape sequence is interpreted by the local terminal.
+    """
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    sys.stdout.write(f"\033]52;c;{encoded}\a")
+    sys.stdout.flush()
 
 
 class JsonLineViewer(App):
@@ -131,6 +145,9 @@ class JsonLineViewer(App):
         ("left", "focus_previous", "Focus Previous"),
         ("right", "focus_next", "Focus Next"),
         ("s", "swith_render", "switch render"),
+        # copy
+        ("c", "copy_sample", "Copy sample"),
+        ("C", "copy_field", "Copy field"),
         # control
         ("n", "next_sample", "Next Sample"),
         ("N", "next_step", "Next Step"),
@@ -462,6 +479,49 @@ class JsonLineViewer(App):
     async def action_swith_render(self):
         self.render_table = not self.render_table
         await self.update_content()
+
+    def _get_current_sample(self) -> Optional[dict]:
+        """Return the current sample dict, or None."""
+        try:
+            samples = self.data[self.selected_step_index].get("samples", [])
+            return samples[self.selected_sample_index]
+        except (KeyError, IndexError):
+            return None
+
+    async def action_copy_sample(self) -> None:
+        """Copy all displayed fields of the current sample to clipboard."""
+        sample = self._get_current_sample()
+        if not sample:
+            self.search_status.update(Text("No sample to copy", style="bold red"))
+            return
+        selected_fields = self.fields_select.selected
+        lines = []
+        for k, v in sample.items():
+            if k == INDEX_KEY or k not in selected_fields:
+                continue
+            lines.append(f"=== {k} ===\n{v}")
+        text = "\n\n".join(lines)
+        osc52_copy(text)
+        self.search_status.update(Text("Copied sample to clipboard", style="bold green"))
+
+    async def action_copy_field(self) -> None:
+        """Copy the next visible field value. Press repeatedly to cycle through fields."""
+        sample = self._get_current_sample()
+        if not sample:
+            self.search_status.update(Text("No sample to copy", style="bold red"))
+            return
+        selected_fields = [k for k in sample if k != INDEX_KEY and k in self.fields_select.selected]
+        if not selected_fields:
+            return
+        # Cycle through fields using a counter
+        if not hasattr(self, "_copy_field_idx"):
+            self._copy_field_idx = 0
+        idx = self._copy_field_idx % len(selected_fields)
+        field = selected_fields[idx]
+        self._copy_field_idx = idx + 1
+        value = str(sample[field])
+        osc52_copy(value)
+        self.search_status.update(Text(f"Copied '{field}' to clipboard", style="bold green"))
 
     def action_toggle_search(self) -> None:
         self.search_box.focus()

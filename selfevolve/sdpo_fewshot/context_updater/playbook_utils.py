@@ -44,7 +44,12 @@ def get_next_global_id(playbook_text):
 
 
 def format_playbook_line(bullet_id, helpful, harmful, content):
-    """Format a bullet into playbook line format"""
+    """Format a bullet into playbook line format.
+
+    Multi-line content is collapsed to a single line to prevent bare lines
+    from leaking into the playbook and surviving future parse/rebuild cycles.
+    """
+    content = " ".join(content.splitlines()).strip()
     return f"[{bullet_id}] helpful={helpful} harmful={harmful} :: {content}"
 
 def update_bullet_counts(playbook_text, bullet_tags):
@@ -90,14 +95,17 @@ def update_bullet_counts(playbook_text, bullet_tags):
             continue
             
         parsed = parse_playbook_line(line)
-        if parsed and parsed['id'] in tag_map:
+        if not parsed:
+            # Drop non-conforming lines (e.g. leaked multi-line content)
+            continue
+        if parsed['id'] in tag_map:
             tag = tag_map[parsed['id']]
             if tag == 'helpful':
                 parsed['helpful'] += 1
             elif tag == 'harmful':
                 parsed['harmful'] += 1
             # neutral: no change
-            
+
             # Reconstruct line with updated counts
             new_line = format_playbook_line(
                 parsed['id'], parsed['helpful'], parsed['harmful'], parsed['content']
@@ -105,7 +113,7 @@ def update_bullet_counts(playbook_text, bullet_tags):
             updated_lines.append(new_line)
         else:
             updated_lines.append(line)
-    
+
     return '\n'.join(updated_lines)
 
 
@@ -178,14 +186,21 @@ def apply_curator_operations(playbook_text, operations, next_id):
             
 
     
-    # Rebuild playbook
+    # Rebuild playbook — only keep section headers, empty lines, and valid bullets.
+    # Any other lines (e.g. bare state-machine descriptions leaked from multi-line
+    # curator content) are dropped so they don't accumulate across steps.
     new_lines = []
+    dropped = 0
     for line in lines:
-        parsed = parse_playbook_line(line)
-        if parsed:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('##'):
+            new_lines.append(line)
+        elif parse_playbook_line(line):
             new_lines.append(line)
         else:
-            new_lines.append(line)
+            dropped += 1
+    if dropped:
+        print(f"[playbook] Dropped {dropped} non-conforming line(s) during rebuild")
     
     # Add new bullets to appropriate sections
     final_lines = []

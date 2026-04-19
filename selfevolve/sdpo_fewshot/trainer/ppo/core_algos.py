@@ -1302,6 +1302,8 @@ def compute_self_distillation_loss(
         metrics["actor/entropy_gt_filter_kept_ratio"] = ((gt_mask * response_mask).sum() / resp_denom).detach().item()
         loss_mask = loss_mask * gt_mask
 
+    metrics["clipped_p_ratio"] = (teacher_distill_log_probs - student_distill_log_probs).detach() if self_distillation_config.full_logit_distillation else (teacher_log_probs - student_log_probs).detach()
+
     is_clip = self_distillation_config.is_clip
     if is_clip is not None:
         if old_log_probs is None:
