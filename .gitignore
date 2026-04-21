@@ -8,7 +8,10 @@
 **/playground
 **/wandb
 selfevolve/sdpo/datasets/lcb_v6/*.json
-figs/
+figs/**/*.pdf
+figs/**/*.png
+figs/**/*.tex
+figs/**/*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
