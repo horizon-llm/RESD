@@ -24,10 +24,16 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="grpo"
 NUM_DATA=${NUM_DATA:--1}
+USE_HARD_DATA=${USE_HARD_DATA:-False}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+if [[ "$USE_HARD_DATA" == "True" ]]; then
+    python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku/train_hard.parquet --num_data $NUM_DATA
+    train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_hard_${NUM_DATA}.parquet
+else
+    python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+    train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
+fi
 
-train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
 val_path=selfevolve/sdpo_fewshot/datasets/sudoku/test.parquet
 
 ########################### Quick Config ###########################
@@ -41,22 +47,23 @@ ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
 LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
-NUM_EPOCHS=${NUM_EPOCHS:-4}
+NUM_EPOCHS=${NUM_EPOCHS:-12}
 # === model ===
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-32768}
 ENABLE_THINKING=True
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True}
 
-project_name='grpo_sokoban'
+project_name='grpo_sudoku'
 
 # Build exp_name: only include non-default args to keep the name short.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
 exp_name="qwen3_4b_$FSDP_STRATEGY"
 _add ndata   "$NUM_DATA"
+_add hard    "$USE_HARD_DATA"              False
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
@@ -129,7 +136,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=74752
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=98304
 )
 
 ROLLOUT=(
@@ -140,7 +147,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=74752
+    actor_rollout_ref.rollout.max_model_len=98304
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95

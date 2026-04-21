@@ -24,10 +24,16 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
+USE_HARD_DATA=${USE_HARD_DATA:-False}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+if [[ "$USE_HARD_DATA" == "True" ]]; then
+    python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku/train_hard.parquet --num_data $NUM_DATA
+    train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_hard_${NUM_DATA}.parquet
+else
+    python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sudoku --num_data $NUM_DATA
+    train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
+fi
 
-train_path=selfevolve/sdpo_fewshot/datasets/sudoku/train_${NUM_DATA}.parquet
 val_path=selfevolve/sdpo_fewshot/datasets/sudoku/test.parquet
 
 ########################### Quick Config ###########################
@@ -44,10 +50,10 @@ CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-26624}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-32768}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-59392}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-65536}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
@@ -104,6 +110,7 @@ _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || 
 
 exp_name="qwen3_4b_fsdp_getsolutionv2"
 _add ndata   "$NUM_DATA"
+_add hard    "$USE_HARD_DATA"              False
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
@@ -220,7 +227,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=92160
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=98304
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -283,7 +290,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.55
-    actor_rollout_ref.rollout.max_model_len=92160
+    actor_rollout_ref.rollout.max_model_len=98304
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
