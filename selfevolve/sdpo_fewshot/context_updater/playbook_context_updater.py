@@ -288,9 +288,9 @@ class PlaybookContextUpdater:
         if self.playbook_mode == "global":
             self._playbooks[_GLOBAL_KEY] = self._make_fresh_state()
 
-        # Deduplicate rollouts: when rollout.n > 1, only process one sample per
-        # unique example_id in reflector/curator/success-tagging to avoid
-        # redundant bullets from multiple rollouts of the same prompt.
+        # Deduplicate rollouts: when rollout.n > 1, only run the curator and
+        # success-tagging on one sample per unique example_id to avoid
+        # redundant playbook operations from multiple rollouts of the same prompt.
         self.deduplicate_rollouts: bool = _get_context_updater_cfg_value(
             sd_cfg, nested_key="deduplicate_rollouts", legacy_key="deduplicate_rollouts", default=False,
         )
@@ -708,6 +708,7 @@ class PlaybookContextUpdater:
                 self._run_success_tagging(
                     correct_indices, prompt_texts, response_texts, playbook_keys,
                     async_rollout_manager, tokenizer, max_prompt_length,
+                    example_ids=example_ids,
                 )
             for k in unique_keys:
                 self._playbooks[k]["update_count"] += 1
@@ -785,18 +786,35 @@ class PlaybookContextUpdater:
             self._run_success_tagging(
                 correct_indices, prompt_texts, response_texts, playbook_keys,
                 async_rollout_manager, tokenizer, max_prompt_length,
+                example_ids=example_ids,
             )
 
         # ----- Curator pass -----
+        # When deduplicate_rollouts is enabled, only run the curator on one
+        # sample per unique example_id to avoid redundant playbook operations
+        # from multiple rollouts of the same prompt.
+        if self.deduplicate_rollouts:
+            seen_eids: Dict[str, int] = {}
+            curator_j_indices: List[int] = []
+            for j in range(len(incorrect_indices)):
+                eid = example_ids[incorrect_indices[j]]
+                if eid not in seen_eids:
+                    seen_eids[eid] = j
+                    curator_j_indices.append(j)
+            if len(curator_j_indices) < num_incorrect:
+                print(f"[PlaybookCU] Curator dedup: {num_incorrect}->{len(curator_j_indices)} samples")
+        else:
+            curator_j_indices = list(range(num_incorrect))
+
         curator_prompts = []
-        for j, (prompt, reflection) in enumerate(zip(inc_prompt_texts, inc_reflection_texts)):
+        for j in curator_j_indices:
             pk = inc_playbook_keys[j]
             pb = self._playbooks[pk]["playbook"]
             stats = get_playbook_stats(pb)
             stats_str = json.dumps(stats, indent=2)
             curator_prompt = self.curator_prompt_template.format(
-                prompt=prompt,
-                recent_reflection=_remove_thinking_trace(reflection),
+                prompt=inc_prompt_texts[j],
+                recent_reflection=_remove_thinking_trace(inc_reflection_texts[j]),
                 playbook_stats=stats_str,
                 current_playbook=pb,
             )
@@ -810,8 +828,10 @@ class PlaybookContextUpdater:
 
         _check_prompt_lengths(curator_prompts, tokenizer, max_prompt_length, label="curator prompt")
 
+        num_curator = len(curator_j_indices)
         curator_batch_padded, curator_pad_size = pad_dataproto_to_divisor(curator_batch, num_workers)
-        print(f"[PlaybookCU] Generating curator operations for {num_incorrect} incorrect samples...")
+        print(f"[PlaybookCU] Generating curator operations for {num_curator} samples "
+              f"(from {num_incorrect} incorrect)...")
         curator_output_padded = async_rollout_manager.generate_sequences(curator_batch_padded)
         curator_output = unpad_dataproto(curator_output_padded, curator_pad_size)
 
@@ -825,7 +845,8 @@ class PlaybookContextUpdater:
 
         # Group operations by playbook key and apply
         ops_by_key: Dict[str, list] = defaultdict(list)
-        for j, curation in enumerate(curation_texts):
+        for ci, j in enumerate(curator_j_indices):
+            curation = curation_texts[ci]
             if curation.startswith("INCORRECT_DUE_TO_EMPTY_RESPONSE"):
                 print(f"⏭️  Skipping curator operation due to empty response")
                 continue
@@ -917,8 +938,22 @@ class PlaybookContextUpdater:
         async_rollout_manager,
         tokenizer,
         max_prompt_length: int,
+        example_ids: Optional[List[str]] = None,
     ):
         """Run a lightweight reflector on correct samples to tag which bullets helped."""
+        # Deduplicate: one correct sample per example_id
+        if self.deduplicate_rollouts and example_ids is not None:
+            seen: Dict[str, int] = {}
+            deduped = []
+            for i in correct_indices:
+                eid = example_ids[i]
+                if eid not in seen:
+                    seen[eid] = i
+                    deduped.append(i)
+            if len(deduped) < len(correct_indices):
+                print(f"[PlaybookCU] Success tagging dedup: {len(correct_indices)}->{len(deduped)} samples")
+            correct_indices = deduped
+
         cor_prompt_texts = [prompt_texts[i] for i in correct_indices]
         cor_response_texts = [response_texts[i] for i in correct_indices]
         cor_playbook_keys = [playbook_keys[i] for i in correct_indices]

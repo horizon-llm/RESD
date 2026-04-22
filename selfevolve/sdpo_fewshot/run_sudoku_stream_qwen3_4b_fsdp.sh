@@ -83,6 +83,7 @@ concise_method=${concise_method:-"reset"} # method for concising context, choose
 concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-False} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
+deduplicate_rollouts=${deduplicate_rollouts:-False} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
@@ -148,6 +149,7 @@ _add cmeth   "$concise_method"             reset
 _add cacur  "$concise_after_curation"    False
 _add tagcor  "$tag_correct_samples"       False
 _add solbuf  "$use_solution_buffer"      False
+_add dedup  "$deduplicate_rollouts"      False
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
 _add ufbttp  "$use_feedback_in_teacher_prompt" True
@@ -266,6 +268,7 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_after_curation=${concise_after_curation}
     actor_rollout_ref.actor.self_distillation.context_updater.tag_correct_samples=${tag_correct_samples}
     actor_rollout_ref.actor.self_distillation.context_updater.use_solution_buffer=${use_solution_buffer}
+    actor_rollout_ref.actor.self_distillation.context_updater.deduplicate_rollouts=${deduplicate_rollouts}
     actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt}
