@@ -31,7 +31,7 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from ...trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_self_distillation_loss, compute_rlsd_token_advantages
+from ...trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_self_distillation_loss, compute_rlsd_token_advantages, compute_clipped_ppo_per_token_loss, compute_srpo_combined_loss
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -204,6 +204,7 @@ class DataParallelPPOActor(BasePPOActor):
             else entropy_from_logits
         )
         self.device_name = get_device_name()
+        self.teacher_module = None
         self._update_step = 0  # counter for token-level loss dumping
         self.param_dtype = PrecisionType.to_dtype(self.config.fsdp_config.get("dtype", "bfloat16"))
         if self.param_dtype == torch.float16:
@@ -247,7 +248,7 @@ class DataParallelPPOActor(BasePPOActor):
             getattr(self.config, "self_distillation", None)
         )
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-        if not self_distillation_cfg or loss_mode not in ("sdpo", "rlsd"):
+        if not self_distillation_cfg or loss_mode not in ("sdpo", "rlsd", "srpo"):
             return
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
         if teacher_regularization != "ema":
@@ -832,7 +833,8 @@ class DataParallelPPOActor(BasePPOActor):
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
         rlsd_enabled = loss_mode == "rlsd"
-        self_distillation_enabled = loss_mode == "sdpo" or rlsd_enabled
+        srpo_enabled = loss_mode == "srpo"
+        self_distillation_enabled = loss_mode == "sdpo" or rlsd_enabled or srpo_enabled
         self_distillation_cfg = self._resolve_self_distillation_cfg(
             getattr(self.config, "self_distillation", None)
         )
@@ -843,6 +845,8 @@ class DataParallelPPOActor(BasePPOActor):
                 "teacher_position_ids",
                 "self_distillation_mask",
             }
+            if srpo_enabled:
+                self_distillation_required_keys.add("correctness_mask")
             assert self_distillation_required_keys.issubset(set(data.batch.keys())), f"Missing required keys: {self_distillation_required_keys - set(data.batch.keys())}"
 
         select_keys = [
@@ -925,6 +929,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
                     # self-distillation mask is a boolean mask of shape (bsz,) computed in the trainer if the sample has a ground-truth solution or there is environment feedback available
                     self_distillation_mask = model_inputs.get("self_distillation_mask") if self_distillation_enabled else None
+                    correctness_mask = model_inputs.get("correctness_mask") if srpo_enabled else None
                     if self_distillation_enabled:
                         assert not has_multi_modal_inputs, "Multi-modal inputs are not supported for distillation"
 
@@ -1169,6 +1174,79 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                         micro_batch_metrics.update(pg_metrics)
 
+                    elif srpo_enabled:
+                        # SRPO: route correct samples to GRPO, incorrect+teacher to DW-SDPO
+                        z_sdpo = (1.0 - correctness_mask) * self_distillation_mask  # (bsz,)
+                        z_grpo = 1.0 - z_sdpo  # (bsz,)
+
+                        # Handle remove_thinking_in_loss for the SDPO branch
+                        remove_thinking_in_loss = self_distillation_cfg.get("remove_thinking_in_loss", False)
+                        if remove_thinking_in_loss:
+                            end_think_token_id = data.meta_info.get("end_think_token_id", None)
+                            if end_think_token_id is None:
+                                raise ValueError("end_think_token_id must be provided in data.meta_info when remove_thinking_in_loss is enabled.")
+                            is_end_think = model_inputs["responses"] == end_think_token_id
+                            after_think = is_end_think.long().cumsum(dim=-1) >= 1
+                            distill_response_mask = (after_think & ~is_end_think).long() * response_mask
+                        else:
+                            distill_response_mask = response_mask
+
+                        grpo_mask = z_grpo.unsqueeze(1) * response_mask  # (bsz, seq_len)
+                        sdpo_mask = z_sdpo.unsqueeze(1) * distill_response_mask  # (bsz, seq_len)
+
+                        # GRPO branch: per-token clipped PPO loss
+                        grpo_per_token = compute_clipped_ppo_per_token_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            clip_ratio=self.config.clip_ratio,
+                            clip_ratio_low=self.config.clip_ratio_low if self.config.clip_ratio_low is not None else self.config.clip_ratio,
+                            clip_ratio_high=self.config.clip_ratio_high if self.config.clip_ratio_high is not None else self.config.clip_ratio,
+                            clip_ratio_c=self.config.get("clip_ratio_c", 3.0),
+                        )
+                        if rollout_is_weights is not None:
+                            grpo_per_token = grpo_per_token * rollout_is_weights
+
+                        # SDPO branch: per-token distillation loss
+                        _, sdpo_metrics = compute_self_distillation_loss(
+                            student_log_probs=log_prob,
+                            teacher_log_probs=teacher_log_prob,
+                            response_mask=distill_response_mask,
+                            self_distillation_config=self_distillation_cfg,
+                            old_log_probs=old_log_prob,
+                            student_all_log_probs=student_all_logps,
+                            teacher_all_log_probs=teacher_all_logps,
+                            student_topk_log_probs=student_topk_logps,
+                            teacher_topk_log_probs=teacher_topk_logps,
+                            self_distillation_mask=self_distillation_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            rollout_is_weights=rollout_is_weights,
+                        )
+                        sdpo_per_token = sdpo_metrics.pop("per_token_loss")
+                        _per_token_loss = sdpo_per_token
+                        _clipped_p_ratio = sdpo_metrics.pop("clipped_p_ratio", None)
+                        sdpo_metrics.pop("per_token_weight", None)
+
+                        # Combine with unified denominator and DW-SDPO entropy weighting
+                        srpo_beta = getattr(self_distillation_cfg, "srpo_entropy_beta", 1.0)
+                        pg_loss, srpo_metrics = compute_srpo_combined_loss(
+                            grpo_per_token_loss=grpo_per_token,
+                            sdpo_per_token_loss=sdpo_per_token,
+                            grpo_mask=grpo_mask,
+                            sdpo_mask=sdpo_mask,
+                            response_mask=response_mask,
+                            teacher_entropy=teacher_entropy,
+                            entropy_beta=srpo_beta,
+                        )
+
+                        srpo_metrics["srpo/z_sdpo_sample_frac"] = z_sdpo.mean().item()
+                        if teacher_entropy is not None:
+                            srpo_metrics["srpo/teacher_entropy"] = agg_loss(
+                                loss_mat=teacher_entropy, loss_mask=sdpo_mask, loss_agg_mode=loss_agg_mode
+                            ).detach().item() if sdpo_mask.sum() > 0 else 0.0
+                        micro_batch_metrics.update(sdpo_metrics)
+                        micro_batch_metrics.update(srpo_metrics)
+
                     elif self_distillation_enabled:
                         remove_thinking_in_loss = self_distillation_cfg.get("remove_thinking_in_loss", False)
                         if remove_thinking_in_loss:
@@ -1358,10 +1436,17 @@ class DataParallelPPOActor(BasePPOActor):
                                 _encourage = _ratio[_ratio > 1.0]
                                 _discourage = _ratio[_ratio <= 1.0]
                                 micro_batch_metrics["actor/p_ratio/encourage_frac"] = _encourage.numel() / _ratio.numel()
-                                if _encourage.numel() > 0:
-                                    micro_batch_metrics["actor/p_ratio/encourage_mean"] = _encourage.mean().item()
-                                if _discourage.numel() > 0:
-                                    micro_batch_metrics["actor/p_ratio/discourage_mean"] = _discourage.mean().item()
+                                micro_batch_metrics["actor/p_ratio/encourage_mean"] = _encourage.mean().item() if _encourage.numel() > 0 else 0.0
+                                micro_batch_metrics["actor/p_ratio/discourage_mean"] = _discourage.mean().item() if _discourage.numel() > 0 else 0.0
+                            else:
+                                micro_batch_metrics["actor/p_ratio/mean"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/max"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/min"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/median"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/std"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/encourage_frac"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/encourage_mean"] = 0.0
+                                micro_batch_metrics["actor/p_ratio/discourage_mean"] = 0.0
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
@@ -1377,20 +1462,35 @@ class DataParallelPPOActor(BasePPOActor):
         # so it can be serialized through Ray without issues.
         if _sd_token_values:
             all_sd = np.concatenate(_sd_token_values)
-            metrics["actor/sd_token_dist"] = all_sd.tolist()
             all_pos = np.concatenate(_sd_token_positions)
+            metrics["actor/sd_token_dist"] = all_sd.tolist()
             metrics["actor/sd_token_by_pos"] = [all_sd.tolist(), all_pos.tolist()]
             if _sd_token_weights:
                 all_w = np.concatenate(_sd_token_weights)
                 metrics["actor/sd_weight_by_pos"] = [all_w.tolist(), all_pos.tolist()]
                 effective_loss = (all_sd * all_w).tolist()
                 metrics["actor/sd_effective_loss_by_pos"] = [effective_loss, all_pos.tolist()]
+            else:
+                metrics["actor/sd_weight_by_pos"] = None
+                metrics["actor/sd_effective_loss_by_pos"] = None
+        else:
+            metrics["actor/sd_token_dist"] = None
+            metrics["actor/sd_token_by_pos"] = None
+            metrics["actor/sd_weight_by_pos"] = None
+            metrics["actor/sd_effective_loss_by_pos"] = None
         if _entropy_positions:
             all_ent_pos = np.concatenate(_entropy_positions)
             if _student_entropy_values:
                 all_student_ent = np.concatenate(_student_entropy_values)
                 metrics["actor/student_entropy_by_pos"] = [all_student_ent.tolist(), all_ent_pos.tolist()]
+            else:
+                metrics["actor/student_entropy_by_pos"] = None
             if _teacher_entropy_values:
                 all_teacher_ent = np.concatenate(_teacher_entropy_values)
                 metrics["actor/teacher_entropy_by_pos"] = [all_teacher_ent.tolist(), all_ent_pos.tolist()]
+            else:
+                metrics["actor/teacher_entropy_by_pos"] = None
+        else:
+            metrics["actor/student_entropy_by_pos"] = None
+            metrics["actor/teacher_entropy_by_pos"] = None
         return metrics

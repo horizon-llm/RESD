@@ -881,7 +881,7 @@ class RayPPOTrainer:
     ) -> Optional[tuple[DataProto, dict[str, float]]]:
         self_distillation_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
-        if self_distillation_cfg is None or loss_mode not in ("sdpo", "rlsd"):
+        if self_distillation_cfg is None or loss_mode not in ("sdpo", "rlsd", "srpo"):
             return None
         
         device = batch.batch["input_ids"].device
@@ -953,6 +953,12 @@ class RayPPOTrainer:
                 print(f"[ACE] Synced student playbook (step={self.global_steps})")
 
         success_by_uid = self._collect_solutions_by_uid(batch, reward_tensor, success_reward_threshold=self_distillation_cfg.success_reward_threshold)
+
+        # Per-sample correctness mask for SRPO routing
+        correctness_mask = None
+        if loss_mode == "srpo":
+            seq_scores = reward_tensor.sum(dim=-1).detach()
+            correctness_mask = (seq_scores >= self_distillation_cfg.success_reward_threshold).float().to(device)
 
         # Store successful trials into the solution buffer (context updater path only).
         # Store raw text — thinking trace removal is handled downstream by _get_solution.
@@ -1253,12 +1259,19 @@ class RayPPOTrainer:
                 "playbook/problematic": playbook_stats.get("problematic", 0),
                 "playbook/unused": playbook_stats.get("unused", 0),
             })
-        return DataProto.from_dict(tensors={
+        if correctness_mask is not None:
+            z_sdpo = (1.0 - correctness_mask) * self_distillation_mask
+            metrics["srpo/grpo_sample_frac"] = (1.0 - z_sdpo).mean().item()
+            metrics["srpo/sdpo_sample_frac"] = z_sdpo.mean().item()
+        tensors = {
             "teacher_input_ids": teacher_input_ids,
             "teacher_attention_mask": teacher_attention_mask,
             "teacher_position_ids": teacher_position_ids,
             "self_distillation_mask": self_distillation_mask,
-        }), metrics
+        }
+        if correctness_mask is not None:
+            tensors["correctness_mask"] = correctness_mask
+        return DataProto.from_dict(tensors=tensors), metrics
 
     @staticmethod
     def _compute_train_batch_metrics(
@@ -2559,12 +2572,19 @@ class RayPPOTrainer:
                             self.checkpoint_manager.update_weights()
 
                         actor_raw_metrics = actor_output.meta_info["metrics"]
-                        sd_token_hist = actor_raw_metrics.pop("actor/sd_token_dist", None)
-                        sd_token_by_pos = actor_raw_metrics.pop("actor/sd_token_by_pos", None)
-                        sd_weight_by_pos = actor_raw_metrics.pop("actor/sd_weight_by_pos", None)
-                        sd_effective_loss_by_pos = actor_raw_metrics.pop("actor/sd_effective_loss_by_pos", None)
-                        student_entropy_by_pos = actor_raw_metrics.pop("actor/student_entropy_by_pos", None)
-                        teacher_entropy_by_pos = actor_raw_metrics.pop("actor/teacher_entropy_by_pos", None)
+                        def _pop_non_scalar(metrics, key):
+                            val = metrics.pop(key, None)
+                            if isinstance(val, list):
+                                val = [v for v in val if v is not None]
+                                if not val:
+                                    return None
+                            return val or None
+                        sd_token_hist = _pop_non_scalar(actor_raw_metrics, "actor/sd_token_dist")
+                        sd_token_by_pos = _pop_non_scalar(actor_raw_metrics, "actor/sd_token_by_pos")
+                        sd_weight_by_pos = _pop_non_scalar(actor_raw_metrics, "actor/sd_weight_by_pos")
+                        sd_effective_loss_by_pos = _pop_non_scalar(actor_raw_metrics, "actor/sd_effective_loss_by_pos")
+                        student_entropy_by_pos = _pop_non_scalar(actor_raw_metrics, "actor/student_entropy_by_pos")
+                        teacher_entropy_by_pos = _pop_non_scalar(actor_raw_metrics, "actor/teacher_entropy_by_pos")
                         actor_output_metrics = reduce_metrics(actor_raw_metrics)
                         if "wandb" in self.config.trainer.logger:
                             import wandb

@@ -155,6 +155,9 @@ self_distillation:
     # Playbook concise strategy: "reset" or "prioritized"
     concise_method: reset
 
+    # Whether to run concise again after curator adds bullets to enforce max_bullets
+    concise_after_curation: false
+
     # Whether to run a lightweight success reflector on correct samples to tag which
     # playbook bullets contributed to success, reinforcing their helpful counts.
     tag_correct_samples: false

@@ -109,6 +109,10 @@ class ContextUpdaterConfig(BaseConfig):
         use_solution_buffer (bool): Whether to cache successful response texts across training steps.
             When batch_size=1 there are no in-batch peers; the buffer lets the trainer re-use a
             successful trial from a previous step as the demonstration. Default False.
+        concise_after_curation (bool): Whether to run an additional concise pass immediately after
+            the curator adds new bullets, ensuring total bullet count stays within max_bullets.
+            Without this, the pre-curation concise may leave room but the curator can push the
+            count back over the limit. Default False.
     """
 
     enabled: bool = False
@@ -118,6 +122,7 @@ class ContextUpdaterConfig(BaseConfig):
     concise_method: str = "reset"
     tag_correct_samples: bool = False
     use_solution_buffer: bool = False
+    concise_after_curation: bool = False
     use_reflection_in_teacher_prompt: bool = True
     use_playbook_in_teacher_prompt: bool = True
     use_feedback_in_teacher_prompt: bool = True
@@ -153,7 +158,7 @@ class ContextUpdaterConfig(BaseConfig):
                 "self_distillation.context_updater.max_bullets must be a positive integer when set, got "
                 f"{self.max_bullets}"
             )
-        valid_concise_methods = ["reset", "prioritized"]
+        valid_concise_methods = ["reset", "prioritized", "staleness"]
         if self.concise_method not in valid_concise_methods:
             raise ValueError(
                 "self_distillation.context_updater.concise_method must be one of "
@@ -280,6 +285,9 @@ class SelfDistillationConfig(BaseConfig):
     rlsd_lambda_warmdown_steps: int = 50  # steps over which lambda decays
     rlsd_epsilon_w: float = 0.2         # clip range for evidence weights w_t
 
+    # SRPO (Sample-Routed Policy Optimization) config — used when policy_loss.loss_mode == "srpo"
+    srpo_entropy_beta: float = 1.0      # β for DW-SDPO entropy weighting: w = exp(-β * H_teacher)
+
     # Legacy flat context-updater fields kept for backward compatibility.
     use_context_updater: bool = False
     concise_frequency: Optional[int] = 4
@@ -398,7 +406,7 @@ class SelfDistillationConfig(BaseConfig):
                     "self_distillation.max_bullets must be a positive integer when set, got "
                     f"{self.max_bullets}"
                 )
-            valid_concise_methods = ["reset", "prioritized"]
+            valid_concise_methods = ["reset", "prioritized", "staleness"]
             if self.concise_method not in valid_concise_methods:
                 raise ValueError(
                     "self_distillation.concise_method must be one of "

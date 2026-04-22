@@ -49,7 +49,10 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
     for key, val in metrics.items():
         if isinstance(val, Metric):
             metrics[key] = val.aggregate()
-        elif "max" in key:
+            continue
+        if isinstance(val, list) and val and isinstance(val[0], list):
+            val = [x for sublist in val for x in sublist]
+        if "max" in key:
             metrics[key] = np.max(val)
         elif "min" in key:
             metrics[key] = np.min(val)

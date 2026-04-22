@@ -1557,6 +1557,83 @@ def compute_rlsd_token_advantages(
     return rlsd_advantages, metrics
 
 
+def compute_clipped_ppo_per_token_loss(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_ratio: float = 0.2,
+    clip_ratio_low: Optional[float] = None,
+    clip_ratio_high: Optional[float] = None,
+    clip_ratio_c: float = 3.0,
+) -> torch.Tensor:
+    """Compute per-token clipped PPO loss WITHOUT aggregation.
+
+    Same math as compute_policy_loss_vanilla but returns the (bsz, seq_len) tensor
+    before agg_loss, for use in SRPO's unified denominator.
+    """
+    if clip_ratio_low is None:
+        clip_ratio_low = clip_ratio
+    if clip_ratio_high is None:
+        clip_ratio_high = clip_ratio
+
+    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+
+    pg_losses1 = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+
+    pg_losses3 = -advantages * clip_ratio_c
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    return pg_losses
+
+
+def compute_srpo_combined_loss(
+    grpo_per_token_loss: torch.Tensor,
+    sdpo_per_token_loss: torch.Tensor,
+    grpo_mask: torch.Tensor,
+    sdpo_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    teacher_entropy: Optional[torch.Tensor] = None,
+    entropy_beta: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute SRPO combined loss with unified token-level denominator.
+
+    GRPO tokens get standard clipped PPO loss.
+    SDPO tokens get entropy-weighted distillation loss (DW-SDPO).
+    Final loss: (sum GRPO_loss + sum DW_SDPO_loss) / total_tokens.
+    """
+    metrics: dict[str, Any] = {}
+    total_tokens = response_mask.sum().clamp(min=1.0)
+
+    grpo_sum = (grpo_per_token_loss * grpo_mask).sum()
+
+    sdpo_n = sdpo_mask.sum()
+    if teacher_entropy is not None and sdpo_n > 0:
+        w_raw = torch.exp(-entropy_beta * teacher_entropy)
+        w_masked = w_raw * sdpo_mask
+        w_sum = w_masked.sum().clamp(min=1e-8)
+        w_norm = w_masked * (sdpo_n / w_sum)
+        sdpo_sum = (sdpo_per_token_loss * w_norm).sum()
+        sdpo_bool = sdpo_mask.bool()
+        metrics["srpo/dw_weight_mean"] = w_norm[sdpo_bool].mean().item()
+        metrics["srpo/dw_weight_std"] = w_norm[sdpo_bool].std().item() if sdpo_n > 1 else 0.0
+    else:
+        sdpo_sum = (sdpo_per_token_loss * sdpo_mask).sum()
+
+    loss = (grpo_sum + sdpo_sum) / total_tokens
+
+    metrics["srpo/grpo_token_sum"] = grpo_sum.detach().item()
+    metrics["srpo/sdpo_token_sum"] = sdpo_sum.detach().item()
+    metrics["srpo/grpo_token_frac"] = (grpo_mask.sum() / total_tokens).item()
+    metrics["srpo/sdpo_token_frac"] = (sdpo_mask.sum() / total_tokens).item()
+    metrics["srpo/total_tokens"] = total_tokens.item()
+
+    return loss, metrics
+
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,

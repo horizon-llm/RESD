@@ -288,6 +288,15 @@ class PlaybookContextUpdater:
         if self.playbook_mode == "global":
             self._playbooks[_GLOBAL_KEY] = self._make_fresh_state()
 
+        # Deduplicate rollouts: when rollout.n > 1, only process one sample per
+        # unique example_id in reflector/curator/success-tagging to avoid
+        # redundant bullets from multiple rollouts of the same prompt.
+        self.deduplicate_rollouts: bool = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="deduplicate_rollouts", legacy_key="deduplicate_rollouts", default=False,
+        )
+        if self.deduplicate_rollouts:
+            print(f"[PlaybookCU] Rollout deduplication enabled — one sample per example_id for reflector/curator")
+
         # Solution buffer: persist successful response texts across steps.
         # Controlled by context_updater.use_solution_buffer (default: False).
         self.use_solution_buffer: bool = _get_context_updater_cfg_value(
@@ -312,6 +321,14 @@ class PlaybookContextUpdater:
         ) or concise_freq or 4
         if self.use_playbook_in_student_rollout:
             print(f"[PlaybookCU] Student rollout playbook enabled — sync every {self._student_sync_frequency} updates")
+
+        # Post-curation concise: run concise immediately after curator adds bullets
+        # to keep total bullet count within max_bullets.
+        self.concise_after_curation: bool = _get_context_updater_cfg_value(
+            sd_cfg, nested_key="concise_after_curation", legacy_key="concise_after_curation", default=False,
+        )
+        if self.concise_after_curation:
+            print(f"[PlaybookCU] Post-curation concise enabled — will trim after curator adds bullets")
 
         print(f"[PlaybookCU] Initialized with playbook_mode={self.playbook_mode!r}")
     
@@ -580,6 +597,7 @@ class PlaybookContextUpdater:
                 n_over = total_remaining - max_bullets
                 if n_over > 0:
                     all_remaining = helpful_ids + surviving_unused
+                    random.shuffle(all_remaining)
                     sorted_by_staleness = sorted(
                         all_remaining,
                         key=lambda bid: last_used.get(bid, 0),
@@ -839,6 +857,28 @@ class PlaybookContextUpdater:
                     if parsed and parsed["id"] not in state["bullet_last_used"]:
                         state["bullet_last_used"][parsed["id"]] = state["update_count"]
                 total_ops += len(ops)
+
+        # Post-curation concise: trim playbooks that exceeded max_bullets after curator additions
+        if self.concise_after_curation and max_bullets:
+            for pk in ops_by_key:
+                state = self._playbooks[pk]
+                post_stats = get_playbook_stats(state["playbook"])
+                if post_stats["total_bullets"] > max_bullets:
+                    print(f"[PlaybookCU] Post-curation concise key={pk!r}: "
+                          f"{post_stats['total_bullets']} bullets > limit={max_bullets}")
+                    state["playbook"] = self._concise_playbook(
+                        state["playbook"], max_bullets, concise_method,
+                        bullet_last_used=state.get("bullet_last_used", {}),
+                        current_step=state["update_count"],
+                    )
+                    remaining_ids = {
+                        parsed["id"]
+                        for line in state["playbook"].strip().split("\n")
+                        if (parsed := parse_playbook_line(line))
+                    }
+                    state["bullet_last_used"] = {
+                        bid: step for bid, step in state["bullet_last_used"].items() if bid in remaining_ids
+                    }
 
         # Increment update counts for all active keys
         for k in unique_keys:

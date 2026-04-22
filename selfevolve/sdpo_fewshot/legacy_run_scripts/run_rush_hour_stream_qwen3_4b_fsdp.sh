@@ -73,6 +73,7 @@ playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" mean
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
+concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-False} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
@@ -134,6 +135,7 @@ _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
 _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
+_add cacur  "$concise_after_curation"    False
 _add tagcor  "$tag_correct_samples"       False
 _add solbuf  "$use_solution_buffer"      False
 _add ureftp  "$use_reflection_in_teacher_prompt" True
@@ -250,6 +252,7 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
+    actor_rollout_ref.actor.self_distillation.context_updater.concise_after_curation=${concise_after_curation}
     actor_rollout_ref.actor.self_distillation.context_updater.tag_correct_samples=${tag_correct_samples}
     actor_rollout_ref.actor.self_distillation.context_updater.use_solution_buffer=${use_solution_buffer}
     actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}

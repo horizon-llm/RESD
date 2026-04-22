@@ -369,9 +369,14 @@ class TaskRunner:
 
         use_stream = config.trainer.get("use_stream_trainer", False)
         if use_stream:
-            from ..trainer.ppo.stream_trainer import StreamRayPPOTrainer
+            if need_critic(config):
+                from ..trainer.ppo.stream_trainer_with_critic import StreamRayPPOTrainerWithCritic
 
-            trainer_cls = StreamRayPPOTrainer
+                trainer_cls = StreamRayPPOTrainerWithCritic
+            else:
+                from ..trainer.ppo.stream_trainer import StreamRayPPOTrainer
+
+                trainer_cls = StreamRayPPOTrainer
         else:
             trainer_cls = RayPPOTrainer
         

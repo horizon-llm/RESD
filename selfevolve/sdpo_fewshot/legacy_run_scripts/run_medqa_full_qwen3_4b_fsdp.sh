@@ -67,6 +67,7 @@ use_context_updater=${use_context_updater:-False}
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context
+concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 
@@ -105,6 +106,7 @@ _add ctxupd  "$use_context_updater"        False
 _add cfreq   "$concise_frequency"          4
 _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
+_add cacur  "$concise_after_curation"    False
 _add ureftp  "$use_reflection_in_teacher_prompt" True
 _add uplaybp "$use_playbook_in_teacher_prompt" True
 
@@ -199,6 +201,7 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.concise_frequency=${concise_frequency}
     actor_rollout_ref.actor.self_distillation.context_updater.max_bullets=${max_bullets}
     actor_rollout_ref.actor.self_distillation.context_updater.concise_method=${concise_method}
+    actor_rollout_ref.actor.self_distillation.context_updater.concise_after_curation=${concise_after_curation}
     actor_rollout_ref.actor.self_distillation.context_updater.use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt}
     actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt}
 )
