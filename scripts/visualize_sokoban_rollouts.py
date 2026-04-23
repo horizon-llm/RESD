@@ -365,15 +365,28 @@ def main():
     else:
         files = sorted(rollouts_dir.glob("*.jsonl"), key=lambda f: int(f.stem))
 
-    html_parts = [HTML_HEADER] if args.save or args.save_path else []
+    saving = args.save or args.save_path
 
     for jsonl_file in files:
         print(f"\n{BOLD}{MAGENTA}{'▓' * 60}{RESET}")
         print(f"{BOLD}{MAGENTA}  File: {jsonl_file.name} (training step {jsonl_file.stem}){RESET}")
         print(f"{BOLD}{MAGENTA}{'▓' * 60}{RESET}")
 
+        html_parts = [HTML_HEADER] if saving else []
+
         with open(jsonl_file) as f:
             samples = [json.loads(line) for line in f]
+
+        # Sort by input so the order is consistent across batches with the same data
+        samples.sort(key=lambda s: s.get("input", ""))
+
+        # Deduplicate: keep only the best rollout (highest score) per problem
+        best_by_input: dict[str, dict] = {}
+        for s in samples:
+            key = s.get("input", "")
+            if key not in best_by_input or s.get("score", 0) > best_by_input[key].get("score", 0):
+                best_by_input[key] = s
+        samples = list(best_by_input.values())
 
         # Filter by score range
         if args.score_range:
@@ -417,25 +430,22 @@ def main():
             else:
                 print(f"  {RED}Sample index {idx} out of range (max {len(samples_filtered) - 1}){RESET}")
 
-    # Save HTML
-    if html_parts:
-        html_parts.append(HTML_FOOTER)
-        if args.save_path:
-            out_path = Path(args.save_path)
-        else:
-            # Build descriptive filename
-            name_parts = ["vis"]
-            if args.step is not None:
-                name_parts.append(f"step{args.step}")
-            if args.score_range:
-                name_parts.append(f"score{args.score_range}")
-            if args.all:
-                name_parts.append("all")
+        # Save HTML per step
+        if html_parts:
+            html_parts.append(HTML_FOOTER)
+            if args.save_path:
+                out_path = Path(args.save_path)
             else:
-                name_parts.append(f"sample{args.sample}")
-            out_path = rollouts_dir / (("_".join(name_parts)) + ".html")
-        out_path.write_text("\n".join(html_parts))
-        print(f"\n{GREEN}Saved HTML to: {out_path}{RESET}")
+                name_parts = ["vis", f"step{jsonl_file.stem}"]
+                if args.score_range:
+                    name_parts.append(f"score{args.score_range}")
+                if args.all:
+                    name_parts.append("all")
+                else:
+                    name_parts.append(f"sample{args.sample}")
+                out_path = rollouts_dir / (("_".join(name_parts)) + ".html")
+            out_path.write_text("\n".join(html_parts))
+            print(f"\n{GREEN}Saved HTML to: {out_path}{RESET}")
 
 
 if __name__ == "__main__":

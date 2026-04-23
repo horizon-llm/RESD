@@ -54,7 +54,7 @@ LR=${LR:-5e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
-EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
+EMA_WEIGHT=${EMA_WEIGHT:-0.0001} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-58368}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
@@ -98,7 +98,7 @@ use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
 use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-True} # whether to include previous trial in the teacher prompt; only applies if use_context_updater is True
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
-reflector_prompt_file=${reflector_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sokoban_reflector_v1.txt"} # path to a .txt file with custom reflector prompt; null uses built-in default
+reflector_prompt_file=${reflector_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sokoban_reflector_v2.txt"} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sokoban_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
@@ -129,8 +129,8 @@ _add maxlen  "$MAX_RESPONSE_LENGTH"        25600
 _add maxrp   "$MAX_REPROMPT_LENGTH"        58368
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
-_add lr      "$LR"                         1e-5
-_add ema     "$EMA_WEIGHT"                 0.05
+_add lr      "$LR"                         5e-6
+_add ema     "$EMA_WEIGHT"                 0.0001
 _add envonly "$ENV_ONLY_WHEN_NO_SOLUTION"  True
 _add distk   "$DISTILLATION_TOPK"          100
 _add distp   "$distillation_top_p"         null
@@ -159,7 +159,7 @@ _add cfreq   "$concise_frequency"          4
 _add mbull   "$max_bullets"                null
 _add cmeth   "$concise_method"             reset
 _add cacur  "$concise_after_curation"    False
-_add tagcor  "$tag_correct_samples"       False
+_add tagcor  "$tag_correct_samples"       True
 _add solbuf  "$use_solution_buffer"      False
 _add dedup  "$deduplicate_rollouts"      False
 _add ureftp  "$use_reflection_in_teacher_prompt" True

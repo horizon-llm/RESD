@@ -201,6 +201,50 @@ def _detect_deadlocked_boxes(matrix):
     return deadlocked
 
 
+def _annotate_solution(entry, gt_answer, model_answer):
+    """Annotate the correct solution with per-move positions and mark divergence from model."""
+    try:
+        grid_list = [list(line) for line in entry["metadata"]["gamestr"].replace(" ", "").strip().split("\n")]
+        matrix = np.array(grid_list)
+        h, w = matrix.shape
+        game = Game(height=h, width=w)
+        game.load_puzzle_matrix(matrix)
+
+        diverge_idx = None
+        for k in range(min(len(gt_answer), len(model_answer))):
+            if gt_answer[k] != model_answer[k]:
+                diverge_idx = k
+                break
+
+        lines = []
+        for i, move in enumerate(gt_answer):
+            p = game.player
+            old_r, old_c = p.y - game.pad_y, p.x - game.pad_x
+
+            move_dir = {"R": (1, 0), "L": (-1, 0), "U": (0, -1), "D": (0, 1)}[move]
+            target_r, target_c = old_r + move_dir[1], old_c + move_dir[0]
+            target_elem = game.puzzle[p.y + move_dir[1], p.x + move_dir[0]]
+            had_box = isinstance(target_elem.obj, Box)
+
+            result = game.player.update(key=move)
+
+            new_r, new_c = p.y - game.pad_y, p.x - game.pad_x
+            desc = f"  {i+1}. {move}: player ({old_r},{old_c})->({new_r},{new_c})"
+            if result == 1 and had_box:
+                box_new_r, box_new_c = target_r + move_dir[1], target_c + move_dir[0]
+                desc += f", pushes box ({target_r},{target_c})->({box_new_r},{box_new_c})"
+
+            if diverge_idx is not None and i == diverge_idx:
+                desc += f"  [DIVERGENCE: model played {model_answer[diverge_idx]} here]"
+
+            lines.append(desc)
+
+        header = "Correct solution annotated:"
+        return header + "\n" + "\n".join(lines)
+    except Exception:
+        return ""
+
+
 # --- Scoring ---
 
 def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, str]:
@@ -328,8 +372,27 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
         board_str = _get_board_string(final_matrix)
         parts.append(f"Board state after your moves:\n{board_str}")
 
+        # Error classification
+        if first_deadlock_move is not None:
+            error_type = "DEADLOCK"
+        elif gt_answer is not None and len(answer) < len(gt_answer) * 0.7:
+            error_type = "TOO_SHORT"
+        elif progress_events and any(
+            on_goals < prev_og for (_, _, on_goals), (_, _, prev_og)
+            in zip(progress_events[1:], progress_events)
+        ):
+            error_type = "REGRESSION"
+        elif blocked_moves and len(blocked_moves) > len(answer) * 0.3:
+            error_type = "BLOCKED"
+        else:
+            error_type = "MISMATCH"
+        parts.append(f"ERROR_TYPE: {error_type}")
+
         if gt_answer is not None:
             parts.append(f"The correct solution is: {gt_answer}")
+            annotated = _annotate_solution(entry, gt_answer, answer)
+            if annotated:
+                parts.append(annotated)
 
         feedback = "\n".join(parts)
         return score, feedback
