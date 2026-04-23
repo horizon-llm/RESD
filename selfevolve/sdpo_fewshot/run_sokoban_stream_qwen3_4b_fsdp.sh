@@ -24,10 +24,22 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
+USE_HARD_DATA=${USE_HARD_DATA:-False}
+CURRICULUM=${CURRICULUM:-False}
 
-python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/sokoban --num_data $NUM_DATA
+SORT_FLAG=""
+if [[ "$CURRICULUM" == "True" ]]; then
+    SORT_FLAG="--sort_by_solution_length"
+fi
 
-train_path=selfevolve/sdpo_fewshot/datasets/sokoban/train_${NUM_DATA}.parquet
+if [[ "$USE_HARD_DATA" == "True" ]]; then
+    python selfevolve/sdpo_fewshot/data/format/sokoban.py --input_parquet selfevolve/sdpo_fewshot/datasets/sokoban/train_hard.parquet --num_data $NUM_DATA $SORT_FLAG
+    train_path=selfevolve/sdpo_fewshot/datasets/sokoban/train_hard_${NUM_DATA}.parquet
+else
+    python selfevolve/sdpo_fewshot/data/format/sokoban.py --input_parquet selfevolve/sdpo_fewshot/datasets/sokoban --num_data $NUM_DATA $SORT_FLAG
+    train_path=selfevolve/sdpo_fewshot/datasets/sokoban/train_${NUM_DATA}.parquet
+fi
+
 val_path=selfevolve/sdpo_fewshot/datasets/sokoban/test.parquet
 
 ########################### Quick Config ###########################
@@ -43,7 +55,7 @@ LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-58368}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
 # === distillation feedback ===
@@ -78,7 +90,7 @@ concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
 concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
-tag_correct_samples=${tag_correct_samples:-False} # whether to run success tagging on correct samples to reinforce playbook bullet counts
+tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
 deduplicate_rollouts=${deduplicate_rollouts:-False} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
@@ -86,7 +98,7 @@ use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
 use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-True} # whether to include previous trial in the teacher prompt; only applies if use_context_updater is True
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
-reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
+reflector_prompt_file=${reflector_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sokoban_reflector_v1.txt"} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/sokoban_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
@@ -96,8 +108,8 @@ student_prompt_file=${student_prompt_file:-null} # path to a .txt file with cust
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 # === stream trainer ===
-max_updates_per_batch=${max_updates_per_batch:-8}
-min_updates_per_batch=${min_updates_per_batch:-8}
+max_updates_per_batch=${max_updates_per_batch:-4}
+min_updates_per_batch=${min_updates_per_batch:-4}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 
 project_name='sdpo_stream_sokoban'
@@ -107,13 +119,14 @@ project_name='sdpo_stream_sokoban'
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_fsdp_getsolutionv2"
+exp_name="qwen3_4b_fsdp_getsolutionv3"
 _add ndata   "$NUM_DATA"
+_add curric  "$CURRICULUM"                 False
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
-_add maxpl   "$MAX_PROMPT_LENGTH"          4096
-_add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
+_add maxpl   "$MAX_PROMPT_LENGTH"          58368
+_add maxlen  "$MAX_RESPONSE_LENGTH"        25600
+_add maxrp   "$MAX_REPROMPT_LENGTH"        58368
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -163,7 +176,7 @@ _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
-_add minupb  "$min_updates_per_batch"      1
+_add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
 
 ########################### Sync Results ###########################
@@ -327,8 +340,8 @@ TRAINER=(
     trainer.n_gpus_per_node=8
     trainer.nnodes=1
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=2
-    trainer.test_freq=2
+    trainer.save_freq=1
+    trainer.test_freq=1
     trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"

@@ -219,13 +219,39 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
         # Count initial boxes
         initial_state = game.get_curr_state()
         initial_boxes = initial_state.count("@")
+        total_boxes = initial_boxes + initial_state.count("$")
+        initial_on_goals = total_boxes - initial_boxes
 
         invalid_chars = [c for c in answer if c not in "LRUD"]
         if invalid_chars:
             return 0.0, f"Invalid move characters: {set(invalid_chars)}. Only L, R, U, D are allowed."
 
+        prev_on_goals = initial_on_goals
+        progress_events = []
+        first_deadlock_move = None
+        first_deadlock_positions = []
+        first_deadlock_board = ""
+        blocked_moves = []
+
         for i, move in enumerate(answer):
-            game.player.update(key=move)
+            result = game.player.update(key=move)
+            if result == 0:
+                blocked_moves.append((i + 1, move))
+
+            curr_state = game.get_curr_state()
+            curr_on_goals = total_boxes - curr_state.count("@")
+
+            if curr_on_goals != prev_on_goals:
+                progress_events.append((i + 1, move, curr_on_goals))
+                prev_on_goals = curr_on_goals
+
+            if first_deadlock_move is None:
+                curr_matrix = game.get_matrix()
+                deadlocked_now = _detect_deadlocked_boxes(curr_matrix)
+                if deadlocked_now:
+                    first_deadlock_move = i + 1
+                    first_deadlock_positions = deadlocked_now
+                    first_deadlock_board = _get_board_string(curr_matrix)
 
         final_matrix = game.get_matrix()
         final_state = game.get_curr_state()
@@ -240,19 +266,59 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
         parts = []
         parts.append(f"Puzzle not solved after {len(answer)} moves. {placed}/{initial_boxes} boxes on goals.")
 
-        # Positions of misplaced boxes (not on goals)
+        # Answer length warning
+        gt_answer = entry.get("answer")
+        if gt_answer is not None and len(answer) < len(gt_answer) * 0.7:
+            parts.append(f"WARNING: Your solution has {len(answer)} moves but the correct solution requires {len(gt_answer)} moves. Your answer is likely too short.")
+
+        # Blocked moves
+        if blocked_moves:
+            move_strs = ", ".join(f"{idx}({m})" for idx, m in blocked_moves)
+            parts.append(f"Blocked moves (hit a wall or immovable box): {len(blocked_moves)}/{len(answer)} wasted — moves {move_strs}.")
+
+        # Per-move progress
+        if progress_events:
+            progress_parts = [f"{initial_on_goals}/{total_boxes}"]
+            for move_idx, move_char, on_goals in progress_events:
+                progress_parts.append(f"{on_goals}/{total_boxes} (after move {move_idx}: {move_char})")
+            parts.append(f"Progress: {' -> '.join(progress_parts)}.")
+
+        # First deadlock
+        if first_deadlock_move is not None:
+            pos_str = ", ".join(f"(row={r}, col={c})" for r, c in first_deadlock_positions)
+            parts.append(
+                f"DEADLOCK created at move {first_deadlock_move}/{len(answer)}: "
+                f"box(es) stuck at {pos_str}. The puzzle became unsolvable at this point.\n"
+                f"Board state at move {first_deadlock_move}:\n{first_deadlock_board}"
+            )
+
+        # Positions of misplaced boxes and empty goals
         misplaced = _find_positions(final_matrix, {"@"})
+        empty_goals = _find_positions(final_matrix, {"X"})
+
         if misplaced:
             pos_str = ", ".join(f"(row={r}, col={c})" for r, c in misplaced)
             parts.append(f"Misplaced boxes at: {pos_str}.")
 
-        # Positions of empty goals
-        empty_goals = _find_positions(final_matrix, {"X"})
         if empty_goals:
             pos_str = ", ".join(f"(row={r}, col={c})" for r, c in empty_goals)
             parts.append(f"Empty goals at: {pos_str}.")
 
-        # Deadlock detection
+        # Box-to-goal pairing hints
+        if misplaced and empty_goals:
+            hints = []
+            for br, bc in misplaced:
+                best_dist = None
+                best_goal = None
+                for gr, gc in empty_goals:
+                    dist = abs(br - gr) + abs(bc - gc)
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_goal = (gr, gc)
+                hints.append(f"Box (row={br}, col={bc}) -> nearest goal (row={best_goal[0]}, col={best_goal[1]}), distance={best_dist}")
+            parts.append("Box-to-goal hints:\n" + "\n".join(hints))
+
+        # Final deadlock detection
         deadlocked = _detect_deadlocked_boxes(final_matrix)
         if deadlocked:
             pos_str = ", ".join(f"(row={r}, col={c})" for r, c in deadlocked)
@@ -262,8 +328,8 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
         board_str = _get_board_string(final_matrix)
         parts.append(f"Board state after your moves:\n{board_str}")
 
-        if entry.get("answer") is not None:
-            parts.append(f"The correct solution is: {entry['answer']}")
+        if gt_answer is not None:
+            parts.append(f"The correct solution is: {gt_answer}")
 
         feedback = "\n".join(parts)
         return score, feedback

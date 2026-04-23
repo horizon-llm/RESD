@@ -53,7 +53,7 @@ LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-49152}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
 ENABLE_THINKING=True
 # === distillation feedback ===
@@ -105,8 +105,8 @@ student_prompt_file=${student_prompt_file:-null} # path to a .txt file with cust
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 # === stream trainer ===
-max_updates_per_batch=${max_updates_per_batch:-8}
-min_updates_per_batch=${min_updates_per_batch:-8}
+max_updates_per_batch=${max_updates_per_batch:-4}
+min_updates_per_batch=${min_updates_per_batch:-4}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
@@ -123,9 +123,9 @@ _add ndata   "$NUM_DATA"
 _add hard    "$USE_HARD_DATA"              False
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
-_add maxpl   "$MAX_PROMPT_LENGTH"          4096
+_add maxpl   "$MAX_PROMPT_LENGTH"          49152
 _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        24576
+_add maxrp   "$MAX_REPROMPT_LENGTH"        49152
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
@@ -174,7 +174,7 @@ _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
-_add minupb  "$min_updates_per_batch"      1
+_add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
 _add sparse  "$sparse_rewards"             False
 
