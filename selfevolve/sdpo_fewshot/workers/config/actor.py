@@ -86,6 +86,8 @@ class ContextUpdaterConfig(BaseConfig):
         tag_correct_samples (bool): Whether to run a lightweight success reflector on correct samples
             to tag which playbook bullets contributed to success, reinforcing their helpful counts.
             Default False — only incorrect samples update bullet counts.
+        deduplicate_rollouts (bool): When rollout.n > 1, only run the curator and success tagging
+            on one sample per unique example_id to avoid redundant playbook operations. Default False.
         reflector_prompt_template (Optional[str]): Template for the reflector prompt.
             Available variables: {prompt}, {response}, {feedback}, {teacher_feedback}, {playbook}.
             If null, uses the built-in default from prompts/ace_reflector.py.
@@ -121,6 +123,7 @@ class ContextUpdaterConfig(BaseConfig):
     max_bullets: Optional[int] = None
     concise_method: str = "reset"
     tag_correct_samples: bool = False
+    deduplicate_rollouts: bool = False
     use_solution_buffer: bool = False
     concise_after_curation: bool = False
     use_reflection_in_teacher_prompt: bool = True
@@ -284,6 +287,12 @@ class SelfDistillationConfig(BaseConfig):
     rlsd_lambda_final: float = 0.0      # final mixing coefficient (decays linearly)
     rlsd_lambda_warmdown_steps: int = 50  # steps over which lambda decays
     rlsd_epsilon_w: float = 0.2         # clip range for evidence weights w_t
+
+    # Success-rate weighting: weight per-token distillation loss by group success rate.
+    # Success samples get (1-sr)^alpha, failure samples get sr^beta, batch-normalized to mean 1.
+    success_rate_weighting: bool = False
+    success_rate_alpha: float = 1.0     # exponent for success sample weights: (1-sr)^alpha
+    success_rate_beta: float = 1.0      # exponent for failure sample weights: sr^beta
 
     # SRPO (Sample-Routed Policy Optimization) config — used when policy_loss.loss_mode == "srpo"
     srpo_entropy_beta: float = 1.0      # β for DW-SDPO entropy weighting: w = exp(-β * H_teacher)

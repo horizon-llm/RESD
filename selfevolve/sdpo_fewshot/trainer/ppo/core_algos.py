@@ -1118,6 +1118,7 @@ def compute_self_distillation_loss(
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
+    success_rate_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
 
     metrics = {}
@@ -1317,6 +1318,10 @@ def compute_self_distillation_loss(
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         per_token_loss = per_token_loss * rollout_is_weights
+
+    # Apply success-rate weighting: (bsz,) → broadcast to (bsz, seq_len)
+    if success_rate_weights is not None:
+        per_token_loss = per_token_loss * success_rate_weights.unsqueeze(1)
 
     position_weighting_enabled = bool(getattr(self_distillation_config, "position_weighting_enabled", False))
     position_weighting_beta = float(getattr(self_distillation_config, "position_weighting_beta", 1.0))

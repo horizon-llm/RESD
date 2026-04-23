@@ -868,6 +868,8 @@ class DataParallelPPOActor(BasePPOActor):
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        if "success_rate_weights" in data.batch.keys():
+            select_keys.append("success_rate_weights")
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
@@ -1262,6 +1264,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             distill_response_mask = response_mask
                             micro_batch_metrics["self_distillation/answer_token_fraction"] = 1.0
+                        success_rate_weights = model_inputs.get("success_rate_weights")
                         pg_loss, pg_metrics = compute_self_distillation_loss(
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,
@@ -1275,6 +1278,7 @@ class DataParallelPPOActor(BasePPOActor):
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
+                            success_rate_weights=success_rate_weights,
                         )
 
                         pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0

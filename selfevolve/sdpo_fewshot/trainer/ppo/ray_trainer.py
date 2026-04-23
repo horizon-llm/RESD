@@ -960,6 +960,32 @@ class RayPPOTrainer:
             seq_scores = reward_tensor.sum(dim=-1).detach()
             correctness_mask = (seq_scores >= self_distillation_cfg.success_reward_threshold).float().to(device)
 
+        # Compute per-sample success-rate weights when enabled.
+        success_rate_weights = None
+        if self_distillation_cfg.get("success_rate_weighting", False):
+            uids = batch.non_tensor_batch["uid"]
+            uid_counts: dict[Any, int] = defaultdict(int)
+            for uid in uids:
+                uid_counts[uid] += 1
+            sr_alpha = self_distillation_cfg.get("success_rate_alpha", 1.0)
+            sr_beta = self_distillation_cfg.get("success_rate_beta", 1.0)
+            raw_weights = []
+            for i in range(batch_size):
+                uid = uids[i]
+                n_success = len(success_by_uid[uid])
+                sr = n_success / uid_counts[uid]
+                is_success = i in success_by_uid[uid]
+                if is_success:
+                    raw_weights.append((1.0 - sr) ** sr_alpha)
+                else:
+                    raw_weights.append(sr ** sr_beta)
+            raw_weights_t = torch.tensor(raw_weights, dtype=torch.float32, device=device)
+            mean_w = raw_weights_t.mean()
+            if mean_w > 1e-8:
+                success_rate_weights = raw_weights_t / mean_w
+            else:
+                success_rate_weights = torch.ones(batch_size, dtype=torch.float32, device=device)
+
         # Store successful trials into the solution buffer (context updater path only).
         # Store raw text — thinking trace removal is handled downstream by _get_solution.
         if self.use_context_updater and self.context_updater is not None and example_ids is not None:
@@ -1271,6 +1297,11 @@ class RayPPOTrainer:
         }
         if correctness_mask is not None:
             tensors["correctness_mask"] = correctness_mask
+        if success_rate_weights is not None:
+            tensors["success_rate_weights"] = success_rate_weights
+            metrics["self_distillation/sr_weight_min"] = success_rate_weights.min().item()
+            metrics["self_distillation/sr_weight_max"] = success_rate_weights.max().item()
+            metrics["self_distillation/sr_weight_std"] = success_rate_weights.std().item()
         return DataProto.from_dict(tensors=tensors), metrics
 
     @staticmethod

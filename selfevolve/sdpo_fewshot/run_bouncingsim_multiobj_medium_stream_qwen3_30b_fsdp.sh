@@ -70,6 +70,9 @@ entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] frac
 entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
 entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
 entropy_gt_filter=${entropy_gt_filter:-False} # whether to apply hard filter where teacher_entropy > student_entropy
+success_rate_weighting=${success_rate_weighting:-False} # whether to weight distillation loss by group success rate
+success_rate_alpha=${success_rate_alpha:-1.0} # exponent for success sample weights: (1-sr)^alpha
+success_rate_beta=${success_rate_beta:-1.0} # exponent for failure sample weights: sr^beta
 # === context updater ===
 use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
@@ -132,6 +135,9 @@ _add edfr    "$entropy_diff_filter_ratio"  null
 _add efr     "$entropy_filter_ratio"      null
 _add efc     "$entropy_filter_criterion"  diff
 _add egf     "$entropy_gt_filter"         False
+_add srw     "$success_rate_weighting"   False
+_add sra     "$success_rate_alpha"       1.0
+_add srb     "$success_rate_beta"        1.0
 _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
@@ -253,6 +259,9 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
     actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
     actor_rollout_ref.actor.self_distillation.entropy_gt_filter=${entropy_gt_filter}
+    actor_rollout_ref.actor.self_distillation.success_rate_weighting=${success_rate_weighting}
+    actor_rollout_ref.actor.self_distillation.success_rate_alpha=${success_rate_alpha}
+    actor_rollout_ref.actor.self_distillation.success_rate_beta=${success_rate_beta}
 )
 
 CONTEXT_UPDATER=(

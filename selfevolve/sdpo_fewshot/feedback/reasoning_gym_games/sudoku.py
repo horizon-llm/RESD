@@ -118,9 +118,11 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
 
         total_cells = board_size * board_size
         reward = num_matching / total_cells
-        reward *= 0.9  # penalty for not using standard format
 
-        feedback_parts = [f"Non-standard format (0.9x penalty). {num_matching}/{total_cells} cells correct."]
+        if row < board_size:
+            feedback_parts = [f"Could only extract {row}/{board_size} rows from your answer. {num_matching}/{total_cells} cells correct."]
+        else:
+            feedback_parts = [f"{num_matching}/{total_cells} cells correct."]
 
         # Wrong cells
         if wrong_cells:
@@ -159,8 +161,4 @@ def score_answer(answer: Optional[str], entry: dict[str, Any]) -> tuple[float, s
 
         feedback = "\n".join(feedback_parts)
 
-    if len(answer) > len(oracle_answer):
-        length_penalty = len(oracle_answer) / len(answer)
-        reward *= length_penalty
-        feedback = (feedback + f"\nResponse too long ({len(answer)} chars vs expected {len(oracle_answer)}), score reduced.").strip()
     return reward, feedback

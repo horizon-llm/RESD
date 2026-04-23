@@ -134,6 +134,11 @@ self_distillation:
   # Requires include_environment_feedback=True to have any effect
   environment_feedback_only_without_solution: True
 
+  # Success-rate weighting for self-distillation loss
+  success_rate_weighting: false
+  success_rate_alpha: 1.0
+  success_rate_beta: 1.0
+
   # IS clip for loss; null disables IS weighting
   is_clip: 2
 
@@ -157,6 +162,10 @@ self_distillation:
 
     # Whether to run concise again after curator adds bullets to enforce max_bullets
     concise_after_curation: false
+
+    # When rollout.n > 1, only run the curator and success tagging on one sample
+    # per unique example_id to avoid redundant playbook operations.
+    deduplicate_rollouts: false
 
     # Whether to run a lightweight success reflector on correct samples to tag which
     # playbook bullets contributed to success, reinforcing their helpful counts.
