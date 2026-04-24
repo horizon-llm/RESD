@@ -973,7 +973,10 @@ class RayPPOTrainer:
             for i in range(batch_size):
                 uid = uids[i]
                 n_success = len(success_by_uid[uid])
-                sr = n_success / uid_counts[uid]
+                n_total = uid_counts[uid]
+                sr = n_success / n_total
+                sr = max(sr, 1.0 / n_total)
+                sr = min(sr, 1.0 - 1.0 / n_total)
                 is_success = i in success_by_uid[uid]
                 if is_success:
                     raw_weights.append((1.0 - sr) ** sr_alpha)

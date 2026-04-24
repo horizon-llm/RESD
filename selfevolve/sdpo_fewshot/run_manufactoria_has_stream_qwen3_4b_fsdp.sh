@@ -52,14 +52,14 @@ LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
-EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
+EMA_WEIGHT=${EMA_WEIGHT:-0.0001} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-49152}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
 ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
-DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
+DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-False} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
 # === distillation objective ===
@@ -86,10 +86,10 @@ playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" mean
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
 concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset", "prioritized" and "staleness"
-concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
-tag_correct_samples=${tag_correct_samples:-False} # whether to run success tagging on correct samples to reinforce playbook bullet counts
+concise_after_curation=${concise_after_curation:-True} # whether to run concise again after curator adds bullets to enforce max_bullets
+tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
-deduplicate_rollouts=${deduplicate_rollouts:-False} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
+deduplicate_rollouts=${deduplicate_rollouts:-True} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
@@ -128,8 +128,8 @@ _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
 _add maxrp   "$MAX_REPROMPT_LENGTH"        49152
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
-_add lr      "$LR"                         1e-5
-_add ema     "$EMA_WEIGHT"                 0.05
+_add lr      "$LR"                         1e-6
+_add ema     "$EMA_WEIGHT"                 0.0001
 _add envonly "$ENV_ONLY_WHEN_NO_SOLUTION"  True
 _add distk   "$DISTILLATION_TOPK"          100
 _add distp   "$distillation_top_p"         null
