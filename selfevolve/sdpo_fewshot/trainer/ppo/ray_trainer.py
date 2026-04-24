@@ -2159,6 +2159,7 @@ class RayPPOTrainer:
         batch.meta_info["default_local_dir"] = self.config.trainer.default_local_dir
         batch.meta_info["global_steps"] = self.global_steps
         batch.meta_info["end_think_token_id"] = self.tokenizer.convert_tokens_to_ids("</think>")
+        batch.meta_info["eos_token_id"] = self.tokenizer.eos_token_id
         # update actor
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()

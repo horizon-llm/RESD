@@ -830,6 +830,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         pad_token_id = data.meta_info.get("pad_token_id", 0)
+        eos_token_id = data.meta_info.get("eos_token_id", None)
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
         rlsd_enabled = loss_mode == "rlsd"
@@ -1223,6 +1224,8 @@ class DataParallelPPOActor(BasePPOActor):
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
+                            topk_indices=student_topk_indices,
+                            eos_token_id=eos_token_id,
                         )
                         sdpo_per_token = sdpo_metrics.pop("per_token_loss")
                         _per_token_loss = sdpo_per_token
@@ -1279,6 +1282,8 @@ class DataParallelPPOActor(BasePPOActor):
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
                             success_rate_weights=success_rate_weights,
+                            topk_indices=student_topk_indices,
+                            eos_token_id=eos_token_id,
                         )
 
                         pg_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0

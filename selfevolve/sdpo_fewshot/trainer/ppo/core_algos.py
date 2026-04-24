@@ -1119,6 +1119,8 @@ def compute_self_distillation_loss(
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
     success_rate_weights: Optional[torch.Tensor] = None,
+    topk_indices: Optional[torch.Tensor] = None,
+    eos_token_id: Optional[int] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
 
     metrics = {}
@@ -1130,6 +1132,63 @@ def compute_self_distillation_loss(
     loss_mask = response_mask
     if self_distillation_mask is not None:
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
+
+    # Teacher sharpening: estimate β where log q(v) ≈ β · log p(v) + c
+    # β > 1 ⇒ teacher is sharper than student
+    with torch.no_grad():
+        _s_logp = student_topk_log_probs if student_topk_log_probs is not None else student_all_log_probs
+        _t_logp = teacher_topk_log_probs if teacher_topk_log_probs is not None else teacher_all_log_probs
+        if _s_logp is not None and _t_logp is not None:
+            _p_m = _s_logp.mean(-1, keepdim=True)
+            _q_m = _t_logp.mean(-1, keepdim=True)
+            _cov = ((_s_logp - _p_m) * (_t_logp - _q_m)).mean(-1)
+            _var = ((_s_logp - _p_m) ** 2).mean(-1)
+            _beta = _cov / _var.clamp(min=1e-8)
+            _denom = loss_mask.sum().clamp(min=1)
+            metrics["actor/teacher_sharpening_beta"] = ((_beta * loss_mask).sum() / _denom).item()
+            metrics["actor/teacher_sharpening_frac_gt1"] = ((_beta > 1).float() * loss_mask).sum().item() / _denom.item()
+        else:
+            _m = loss_mask.bool().flatten()
+            _pf = student_log_probs.detach().flatten()[_m]
+            _qf = teacher_log_probs.detach().flatten()[_m]
+            if _pf.numel() > 1:
+                _pf_m, _qf_m = _pf.mean(), _qf.mean()
+                _beta_val = ((_pf - _pf_m) * (_qf - _qf_m)).mean() / ((_pf - _pf_m) ** 2).mean().clamp(min=1e-8)
+                metrics["actor/teacher_sharpening_beta"] = _beta_val.item()
+
+    # EOS-in-top-k tracking: how often EOS appears, and its relative log-ratio advantage
+    # A_t(v) = log q_t(v) - log p_t(v), metric = A_t(eos) - E_{v≠eos}[A_t(v)]
+    with torch.no_grad():
+        _s_logp = student_topk_log_probs if student_topk_log_probs is not None else student_all_log_probs
+        _t_logp = teacher_topk_log_probs if teacher_topk_log_probs is not None else teacher_all_log_probs
+        _indices = topk_indices
+        if eos_token_id is not None and _s_logp is not None and _t_logp is not None:
+            _A = _t_logp - _s_logp  # (bs, seq_len, K) log q/p ratio
+            if _indices is not None:
+                # top-k mode: check if EOS is among the top-k indices
+                _eos_in_topk = (_indices == eos_token_id)  # (bs, seq_len, K)
+                _has_eos = _eos_in_topk.any(-1)  # (bs, seq_len)
+                _denom = loss_mask.sum().clamp(min=1)
+                metrics["actor/eos_in_topk_frac"] = ((_has_eos.float() * loss_mask).sum() / _denom).item()
+
+                # A(eos) - E_{v≠eos}[A(v)] at positions where EOS is present
+                _eos_A = (_A * _eos_in_topk.float()).sum(-1)  # at most 1 match per position
+                _non_eos_mask = ~_eos_in_topk  # (bs, seq_len, K)
+                _non_eos_count = _non_eos_mask.float().sum(-1).clamp(min=1)
+                _non_eos_mean_A = (_A * _non_eos_mask.float()).sum(-1) / _non_eos_count
+                _eos_advantage = _eos_A - _non_eos_mean_A  # (bs, seq_len)
+                _pos_mask = _has_eos.float() * loss_mask
+                _pos_denom = _pos_mask.sum().clamp(min=1)
+                metrics["actor/eos_logratio_advantage"] = ((_eos_advantage * _pos_mask).sum() / _pos_denom).item()
+            else:
+                # full-logit mode: index directly into vocab dimension
+                _eos_A = _A[:, :, eos_token_id]  # (bs, seq_len)
+                _K = _A.shape[-1]
+                _sum_A = _A.sum(-1)
+                _non_eos_mean_A = (_sum_A - _eos_A) / max(_K - 1, 1)
+                _eos_advantage = _eos_A - _non_eos_mean_A
+                _denom = loss_mask.sum().clamp(min=1)
+                metrics["actor/eos_logratio_advantage"] = ((_eos_advantage * loss_mask).sum() / _denom).item()
 
     if self_distillation_config.full_logit_distillation:
         use_topk = self_distillation_config.distillation_topk is not None or self_distillation_config.distillation_top_p is not None

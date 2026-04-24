@@ -61,7 +61,7 @@ ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-58368}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
-DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-True} # whether to skip reprompting when the model's own generation is already successful
+DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-False} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
 include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
 success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
@@ -87,12 +87,12 @@ success_rate_beta=${success_rate_beta:-1.0} # exponent for failure sample weight
 use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
 concise_frequency=${concise_frequency:-4} # how often to concise the context
-max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
-concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
-concise_after_curation=${concise_after_curation:-False} # whether to run concise again after curator adds bullets to enforce max_bullets
+max_bullets=${max_bullets:-120} # maximum number of feedback bullets to include in the context; null means no limit
+concise_method=${concise_method:-"staleness"} # method for concising context, choose from "reset" or "prioritized"
+concise_after_curation=${concise_after_curation:-True} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
-use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
-deduplicate_rollouts=${deduplicate_rollouts:-False} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
+use_solution_buffer=${use_solution_buffer:-True} # whether to cache successful trials across steps (useful when batch_size=1)
+deduplicate_rollouts=${deduplicate_rollouts:-True} # whether to deduplicate rollouts per example_id in curator/success-tagging (useful when rollout.n > 1)
 use_reflection_in_teacher_prompt=${use_reflection_in_teacher_prompt:-True} # whether to include model's own reflection in the teacher prompt
 use_playbook_in_teacher_prompt=${use_playbook_in_teacher_prompt:-True} # whether to include playbook in the teacher prompt
 use_feedback_in_teacher_prompt=${use_feedback_in_teacher_prompt:-True} # whether to include teacher feedback in the teacher prompt
