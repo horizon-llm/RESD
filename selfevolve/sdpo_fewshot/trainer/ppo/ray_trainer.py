@@ -967,21 +967,26 @@ class RayPPOTrainer:
             uid_counts: dict[Any, int] = defaultdict(int)
             for uid in uids:
                 uid_counts[uid] += 1
-            sr_alpha = self_distillation_cfg.get("success_rate_alpha", 1.0)
-            sr_beta = self_distillation_cfg.get("success_rate_beta", 1.0)
-            raw_weights = []
-            for i in range(batch_size):
-                uid = uids[i]
-                n_success = len(success_by_uid[uid])
-                n_total = uid_counts[uid]
-                sr = n_success / n_total
-                sr = max(sr, 1.0 / n_total)
-                sr = min(sr, 1.0 - 1.0 / n_total)
-                is_success = i in success_by_uid[uid]
-                if is_success:
-                    raw_weights.append((1.0 - sr) ** sr_alpha)
-                else:
-                    raw_weights.append(sr ** sr_beta)
+            max_rollouts_per_uid = max(uid_counts.values())
+            if max_rollouts_per_uid <= 1:
+                success_rate_weights = None
+            else:
+                sr_alpha = self_distillation_cfg.get("success_rate_alpha", 1.0)
+                sr_beta = self_distillation_cfg.get("success_rate_beta", 1.0)
+                raw_weights = []
+                for i in range(batch_size):
+                    uid = uids[i]
+                    n_success = len(success_by_uid[uid])
+                    n_total = uid_counts[uid]
+                    sr = n_success / n_total
+                    if n_total > 1:
+                        sr = max(sr, 1.0 / n_total)
+                        sr = min(sr, 1.0 - 1.0 / n_total)
+                    is_success = i in success_by_uid[uid]
+                    if is_success:
+                        raw_weights.append((1.0 - sr) ** sr_alpha)
+                    else:
+                        raw_weights.append(sr ** sr_beta)
             raw_weights_t = torch.tensor(raw_weights, dtype=torch.float32, device=device)
             mean_w = raw_weights_t.mean()
             if mean_w > 1e-8:

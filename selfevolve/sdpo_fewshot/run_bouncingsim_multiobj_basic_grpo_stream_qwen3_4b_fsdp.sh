@@ -25,16 +25,16 @@ CONFIG_NAME="grpo"
 NUM_DATA=${NUM_DATA:--1}
 
 python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
-    --data_source bouncingsim/bouncingsim-MULTIOBJ-easy \
+    --data_source bouncingsim/bouncingsim-MULTIOBJ-basic \
     --num_data ${NUM_DATA} \
-    --data_source_suffix "multiobj_easy"
+    --data_source_suffix "multiobj_basic"
 
-train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/train_${NUM_DATA}.parquet
-val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_easy/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_basic/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_multiobj_basic/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=bouncingsim_multiobj_easy
+TASK=bouncingsim_multiobj_basic
 export TASK
 
 # === optim ===
@@ -55,7 +55,7 @@ early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True}
 
-project_name='grpo_stream_bouncingsim_easy'
+project_name='grpo_stream_bouncingsim_basic'
 
 # Build exp_name: only include non-default args to keep the name short.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
