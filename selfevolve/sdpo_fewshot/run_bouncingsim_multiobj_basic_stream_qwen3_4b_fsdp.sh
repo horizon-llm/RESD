@@ -142,6 +142,7 @@ _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
+_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" False
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4

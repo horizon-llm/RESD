@@ -16,7 +16,8 @@
       "Read(//Users/yuwzhan/Documents/codes/rl-grok-recipe/competitioncode/**)",
       "Read(//Users/yuwzhan/Documents/codes/rl-grok-recipe/train/**)",
       "Bash(xargs ls *)",
-      "Read(//Users/yuwzhan/Documents/codes/rl-grok-recipe/**)"
+      "Read(//Users/yuwzhan/Documents/codes/rl-grok-recipe/**)",
+      "Read(//Users/yuwzhan/**)"
     ]
   }
 }

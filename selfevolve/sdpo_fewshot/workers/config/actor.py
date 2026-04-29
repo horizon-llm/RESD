@@ -288,7 +288,7 @@ class SelfDistillationConfig(BaseConfig):
     rlsd_lambda_warmdown_steps: int = 50  # steps over which lambda decays
     rlsd_epsilon_w: float = 0.2         # clip range for evidence weights w_t
 
-    # Success-rate weighting: weight per-token distillation loss by group success rate.
+    # Success-rate weighting: weight per-token distillation loss by overall batch success rate.
     # Success samples get (1-sr)^alpha, failure samples get sr^beta, batch-normalized to mean 1.
     success_rate_weighting: bool = False
     success_rate_alpha: float = 1.0     # exponent for success sample weights: (1-sr)^alpha

@@ -107,7 +107,7 @@ def main():
 
     ylabels = {}
     if args.ylabels:
-        for i, group_name in enumerate(args.groups):
+        for i, group_name in enumerate(args.combined_order):
             if i < len(args.ylabels):
                 ylabels[group_name] = args.ylabels[i]
 

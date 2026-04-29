@@ -31,10 +31,10 @@ if [[ "$USE_HARD_DATA" == "True" ]]; then
     train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_hard_${NUM_DATA}.parquet
 else
     python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
-        --train_data_source manufactoria/has_train \
-        --test_data_source manufactoria/has_test \
+        --train_data_source manufactoria/ends_train \
+        --test_data_source manufactoria/ends_test \
         --num_data ${NUM_DATA} \
-        --data_source_suffix "has"
+        --data_source_suffix "ends"
     train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_${NUM_DATA}.parquet
 fi
 
@@ -111,7 +111,7 @@ early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_stream_manufactoria'
+project_name='sdpo_stream_manufactoria_ends'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]

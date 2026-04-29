@@ -98,8 +98,8 @@ student_prompt_file=${student_prompt_file:-null} # path to a .txt file with cust
 teacher_enabled=${teacher_enabled:-False}
 feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 # === stream trainer ===
-max_updates_per_batch=${max_updates_per_batch:-8}
-min_updates_per_batch=${min_updates_per_batch:-8}
+max_updates_per_batch=${max_updates_per_batch:-4}
+min_updates_per_batch=${min_updates_per_batch:-4}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
@@ -139,6 +139,7 @@ _add srw     "$success_rate_weighting"   False
 _add sra     "$success_rate_alpha"       1.0
 _add srb     "$success_rate_beta"        1.0
 _add think   "$ENABLE_THINKING"            True
+_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" False
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
@@ -165,7 +166,7 @@ _add stupf   "$(basename "${student_prompt_file}" .txt)"   null
 _add teachfb "$teacher_enabled"   False
 _add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
-_add minupb  "$min_updates_per_batch"      1
+_add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
 _add sparse  "$sparse_rewards"             False
 
@@ -331,7 +332,7 @@ TRAINER=(
     trainer.nnodes=2
     trainer.max_actor_ckpt_to_keep=1
     trainer.save_freq=1
-    trainer.test_freq=2
+    trainer.test_freq=1
     trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"

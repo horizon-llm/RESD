@@ -20,29 +20,22 @@ export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
-########################### Data Preprocess ###########################
+########################### Quick Config ###########################
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
-USE_HARD_DATA=${USE_HARD_DATA:-False}
 
-if [[ "$USE_HARD_DATA" == "True" ]]; then
-    python selfevolve/sdpo_fewshot/preprocess.py --truncate_parquet selfevolve/sdpo_fewshot/datasets/manufactoria/train_hard.parquet --num_data $NUM_DATA
-    train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_hard_${NUM_DATA}.parquet
-else
-    python selfevolve/sdpo_fewshot/data/format/manufactoria.py \
-        --train_data_source manufactoria/has_train \
-        --test_data_source manufactoria/has_test \
-        --num_data ${NUM_DATA} \
-        --data_source_suffix "has"
-    train_path=selfevolve/sdpo_fewshot/datasets/manufactoria/train_${NUM_DATA}.parquet
-fi
+python selfevolve/sdpo_fewshot/data/format/bouncingsim.py \
+    --data_source bouncingsim/bouncingsim-GRAVITY-basic \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "gravity_basic"
 
-val_path=selfevolve/sdpo_fewshot/datasets/manufactoria/test.parquet
+train_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_gravity_basic/train_${NUM_DATA}.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/bouncingsim_gravity_basic/test.parquet
 
 ########################### Quick Config ###########################
 
-TASK=manufactoria
+TASK=bouncingsim_gravity_basic
 export TASK
 
 # === optim ===
@@ -53,11 +46,11 @@ LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
 EMA_WEIGHT=${EMA_WEIGHT:-0.0001} # 0.0 means no EMA, higher means more weight on updated student
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-49152}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-58368}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 ENABLE_THINKING=True
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-58368}
 ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-False} # whether to skip reprompting when the model's own generation is already successful
 remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
@@ -85,7 +78,7 @@ use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
-concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset", "prioritized" and "staleness"
+concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
 concise_after_curation=${concise_after_curation:-True} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
@@ -97,7 +90,7 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/manufactoria_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/sdpo_fewshot/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
 student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
 student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
@@ -111,7 +104,7 @@ early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
 # === reward function ===
 sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-project_name='sdpo_stream_manufactoria'
+project_name='sdpo_stream_bouncingsim_gravity_basic'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
@@ -120,12 +113,11 @@ _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || 
 
 exp_name="qwen3_4b_fsdp_getsolutionv3"
 _add ndata   "$NUM_DATA"
-_add hard    "$USE_HARD_DATA"              False
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
-_add maxpl   "$MAX_PROMPT_LENGTH"          49152
-_add maxlen  "$MAX_RESPONSE_LENGTH"        20480
-_add maxrp   "$MAX_REPROMPT_LENGTH"        49152
+_add maxpl   "$MAX_PROMPT_LENGTH"          58368
+_add maxlen  "$MAX_RESPONSE_LENGTH"        25600
+_add maxrp   "$MAX_REPROMPT_LENGTH"        58368
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-6
@@ -150,7 +142,7 @@ _add think   "$ENABLE_THINKING"            True
 _add rmthl   "$remove_thinking_in_loss"    False
 _add rmthd   "$remove_thinking_from_demonstration" False
 _add prevatt "$include_previous_attempt"   False
-_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" True
+_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" False
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -226,7 +218,7 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
-    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/manufactoria.py
+    custom_reward_function.path=selfevolve/sdpo_fewshot/feedback/bouncingsim.py
     custom_reward_function.name=compute_score
     +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
@@ -243,7 +235,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr_warmup_steps=10
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=69632
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=83968
     actor_rollout_ref.actor.token_loss_dump_n=2
 )
 
@@ -309,8 +301,8 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
-    actor_rollout_ref.rollout.max_model_len=69632
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55
+    actor_rollout_ref.rollout.max_model_len=83968
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=0.95
