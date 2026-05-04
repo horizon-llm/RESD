@@ -12,6 +12,7 @@ figs/**/*.pdf
 figs/**/*.png
 figs/**/*.tex
 figs/**/*.json
+wandb_run_download
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

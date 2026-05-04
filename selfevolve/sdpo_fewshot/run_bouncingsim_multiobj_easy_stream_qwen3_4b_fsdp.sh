@@ -78,7 +78,7 @@ use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
 concise_frequency=${concise_frequency:-4} # how often to concise the context
 max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
-concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
+concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset", "prioritized", "staleness"
 concise_after_curation=${concise_after_curation:-True} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)

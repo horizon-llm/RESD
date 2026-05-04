@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+set -xeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
 ########################### Quick Config ###########################
 
@@ -6,10 +14,11 @@ MODEL=Qwen/Qwen3-4B-Thinking-2507
 MODEL_SLUG=qwen3-4b-thinking-2507
 BATCH_SIZE=${BATCH_SIZE:-32} # controls update frequency
 BATCH_WORKERS=${BATCH_WORKERS:-32} # controls concurrency
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-16384}
-NUM_EPOCHS=${NUM_EPOCHS:-3}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+NUM_EPOCHS=${NUM_EPOCHS:-4}
 EVAL_STEPS=${EVAL_STEPS:-4} # number of batches between evaluations
 
+export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 echo "Using Python: $("$PYTHON" -c 'import sys; print(sys.executable)')"
 wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
@@ -89,4 +98,4 @@ result_dir="results_${MODEL_SLUG}_b${BATCH_SIZE}_e${NUM_EPOCHS}_maxlen${MAX_RESP
     --batch_size $BATCH_SIZE \
     --batch_workers $BATCH_WORKERS \
     --wandb_project $project_name \
-    --wandb_run $exp_name
+    --wandb_run_name $exp_name

@@ -4,41 +4,20 @@ set -euo pipefail
 # Run test_lcbv6.sh against every checkpoint under
 # s3://shopqa-users/kayleexl/models_livecodebench/
 
-S3_BASE="s3://shopqa-users/kayleexl/models_livecodebench"
+# S3_BASE="s3://shopqa-users/kayleexl/models_livecodebench"
+S3_BASE="s3://shopqa-users/kayleexl/final_models/base-model-7b"
+S3_RESULTS="s3://shopqa-users/yuwzhan/kayleexl_models_livecodebench"
 LOCAL_BASE="checkpoints/kayleexl_models_livecodebench"
 
 CHECKPOINTS=(
-    "AdaptThink-1.5B-delta0.01"
-    "AdaptThink-1.5B-delta0.05"
-    "AdaptThink-1.5B-delta0.075"
-    "AdaptThink-1.5B-delta0.1"
-    "DRPO-1.5B"
-    "DeepSeek-R1-Distill-Qwen-1.5B"
-    "GPQA_grpo_380"
-    "GPQA_grpo_outcome_p0.5_0.7_1.4_100"
-    "GPQA_w0.5_0.3_max0.15_beta1_theta0.2_110"
-    "GPQA_w0.5_0.3_max0.15_beta1_theta0.3_300"
-    "GPQA_w0.5_0.3_max0.15_beta1_theta0.3_600"
-    "GPQA_w0.5_0.3_max0.15_beta1_theta0.5_720"
-    "JET-1.5B"
-    "LCR1_1.5B"
-    "Laser-D-L1024-1.5B"
-    "Laser-D-L2048-1.5B"
-    "Laser-D-L4096-1.5B"
-    "Laser-DE-L1024-1.5B"
-    "Laser-DE-L2048-1.5B"
-    "Laser-DE-L4096-1.5B"
-    "Laser-L8192-1.5B"
-    "Thinkprune-2k"
-    "Thinkprune-3k"
-    "Thinkprune-4k"
-    "Thinkprune-iter2k"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.2_600"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.2_790"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.2_950"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.3_660"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.3_780"
-    "pen_w0.5-0.3_max0.15_beta1_theta0.3_910"
+    "AdaptThink-7B-delta0.05"
+    "DeepSeek-R1-Distill-Qwen-7B"
+    "L1-Qwen-7B-Exact"
+    "L1-Qwen-7B-Max"
+    "LCR1_7B"
+    "Laser-D-L4096-7B"
+    "Laser-DE-L4096-7B"
+    "deepseek-7b_pen_beta1_theta0.2_490"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,13 +54,25 @@ for ckpt in "${CHECKPOINTS[@]}"; do
     echo "[sync] ${S3_BASE}/${ckpt}/ -> ${local_path}/"
     aws s3 sync "${S3_BASE}/${ckpt}/" "${local_path}/" --region us-east-1
 
+    val_dir="kayleexl_models_livecodebench/${ckpt}"
+    mkdir -p "${val_dir}"
+
     # These are plain HuggingFace weights, not training checkpoints.
     # Load via model.path override; do NOT set CHECKPOINT_PATH (that triggers
     # trainer.resume_mode=resume_path which requires "global_step_" in the path).
     bash "${SCRIPT_DIR}/test_lcbv6.sh" \
         actor_rollout_ref.model.path="${local_path}" \
-        trainer.validation_data_dir="val_generations/kayleexl_models_livecodebench/${ckpt}" \
-        "$@"
+        actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=3072 \
+        trainer.validation_data_dir="${val_dir}" \
+        "$@" \
+        2>&1 | tee "${val_dir}/test_output.log"
+
+    # Extract val-core / val-aux metric lines into a summary file
+    grep -E "^val-(core|aux)/" "${val_dir}/test_output.log" > "${val_dir}/metrics_summary.txt" 2>/dev/null || true
+
+    # Upload results to S3
+    echo "[upload] Syncing ${val_dir}/ -> ${S3_RESULTS}/${ckpt}/"
+    aws s3 sync "${val_dir}/" "${S3_RESULTS}/${ckpt}/" --region us-east-1
 
     clear_gpus
 done

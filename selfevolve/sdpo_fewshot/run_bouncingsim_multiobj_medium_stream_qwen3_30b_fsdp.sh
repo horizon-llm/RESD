@@ -111,7 +111,7 @@ project_name='sdpo_stream_bouncingsim'
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_fsdp_getsolutionv2"
+exp_name="qwen3_30b_fsdp_getsolutionv3"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8

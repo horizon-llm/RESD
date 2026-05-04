@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -29,10 +30,10 @@ METRIC_GROUPS = {
 }
 
 METRIC_LABELS = {
-    "acc/mean": "mean@k",
-    "acc/best": "best@k",
-    "score/mean": "mean@k",
-    "score/best": "best@k",
+    "acc/mean": "mean@{k}",
+    "acc/best": "best@{k}",
+    "score/mean": "mean@{k}",
+    "score/best": "best@{k}",
 }
 
 # Line styles per metric type: same color per method, different style per metric
@@ -57,6 +58,19 @@ def resolve_csv(path: Path) -> Path:
     raise FileNotFoundError(f"No CSV found at {path}")
 
 
+def infer_k(csv_path: Path) -> int | None:
+    """Infer k from the first JSONL sibling of the CSV file."""
+    jsonl = next(csv_path.parent.glob("*.jsonl"), None)
+    if jsonl is None:
+        return None
+    problems = defaultdict(int)
+    with open(jsonl) as f:
+        for line in f:
+            entry = json.loads(line)
+            problems[entry["input"]] += 1
+    return min(problems.values())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("paths", nargs="+", help="CSV files or directories containing val_metrics.csv")
@@ -71,6 +85,8 @@ def main():
                         help="Colors for each method (e.g., red blue '#1f77b4' tab:orange)")
     parser.add_argument("--ylabels", nargs="+", default=None,
                         help="Y-axis labels for each metric group, in the order of --groups (e.g., --ylabels 'Accuracy' 'Score')")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Only plot the first N steps (truncate curves beyond this point)")
     parser.add_argument("-o", "--output", type=str, default=None,
                         help="Output directory for figures (default: same dir as first CSV)")
     args = parser.parse_args()
@@ -78,6 +94,9 @@ def main():
     csv_paths = [resolve_csv(Path(p)) for p in args.paths]
     labels = args.labels or [p.parent.name for p in csv_paths]
     assert len(labels) == len(csv_paths), "Number of labels must match number of paths"
+
+    k = infer_k(csv_paths[0])
+    k_str = str(k) if k is not None else "k"
 
     def read_csv(path):
         with open(path) as f:
@@ -87,16 +106,21 @@ def main():
 
     all_data = {label: read_csv(p) for label, p in zip(labels, csv_paths)}
 
+    if args.max_steps is not None:
+        for label, data in all_data.items():
+            n = sum(1 for s in data["step"] if s <= args.max_steps)
+            all_data[label] = {k: v[:n] for k, v in data.items()}
+
     # Paper-ready style
     plt.rcParams.update({
-        "font.size": 16,
-        "axes.labelsize": 18,
+        "font.size": 12,
+        "axes.labelsize": 14,
         "axes.linewidth": 1.5,
         "xtick.major.width": 1.5,
         "ytick.major.width": 1.5,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "legend.fontsize": 14,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 9,
         "figure.dpi": 150,
         "savefig.bbox": "tight",
         "savefig.pad_inches": 0.05,
@@ -121,7 +145,7 @@ def main():
                 color = default_colors[method_idx % len(default_colors)]
             for metric in metrics:
                 metric_type = metric.split("/")[-1]  # "mean" or "best"
-                style_label = METRIC_LABELS[metric]
+                style_label = METRIC_LABELS[metric].format(k=k_str)
                 if len(all_data) > 1:
                     style_label = f"{label} / {style_label}"
                 ax.plot(data["step"], data[metric], label=style_label,
@@ -142,7 +166,7 @@ def main():
     for group_name in args.groups:
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
         plot_group(ax, group_name, all_data)
-        fig.tight_layout()
+        fig.tight_layout(rect=[0, 0, 1, 0.88])
         for ext in ("pdf", "png"):
             out_path = out_dir / f"val_{group_name}.{ext}"
             fig.savefig(out_path)
@@ -152,29 +176,50 @@ def main():
     # Combined side-by-side: score (left), acc (right)
     if len(args.groups) > 1:
         combined_groups = [g for g in args.combined_order if g in args.groups]
-        fig, axes = plt.subplots(1, len(combined_groups), figsize=(5.5 * len(combined_groups), 4.5))
-        if len(combined_groups) == 1:
-            axes = [axes]
-        for ax, group_name in zip(axes, combined_groups):
-            plot_group(ax, group_name, all_data, show_legend=False)
-        # Single shared legend across the top
-        handles, labels_leg = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels_leg, frameon=False,
-                   loc="lower center", bbox_to_anchor=(0.5, 0.92),
-                   ncol=len(handles))
-        fig.subplots_adjust(left=0.06, right=0.98, bottom=0.14, top=0.85, wspace=0.2)
-        for ext in ("pdf", "png"):
-            out_path = out_dir / f"val_combined.{ext}"
-            fig.savefig(out_path)
-            print(f"Saved to {out_path}")
-        plt.close(fig)
+        # Combined figure is wider than individual plots, so it gets scaled down
+        # more when embedded in papers. Bump font sizes to compensate.
+        combined_rc = {
+            "font.size": 18,
+            "axes.labelsize": 22,
+            "xtick.labelsize": 17,
+            "ytick.labelsize": 17,
+            "legend.fontsize": 15,
+        }
+        with plt.rc_context(combined_rc):
+            fig, axes = plt.subplots(1, len(combined_groups), figsize=(5.5 * len(combined_groups), 4.5))
+            if len(combined_groups) == 1:
+                axes = [axes]
+            for ax, group_name in zip(axes, combined_groups):
+                plot_group(ax, group_name, all_data, show_legend=False)
+            # Single shared legend across the top
+            handles, labels_leg = axes[0].get_legend_handles_labels()
+            max_cols = 4
+            ncol = min(len(handles), max_cols)
+            nrows = -(-len(handles) // ncol)  # ceil division
+            top_margin = 0.90 - 0.05 * (nrows - 1)
+            fig.legend(handles, labels_leg, frameon=False,
+                       loc="lower center", bbox_to_anchor=(0.5, top_margin + 0.01),
+                       ncol=ncol)
+            fig.subplots_adjust(left=0.07, right=0.98, bottom=0.16, top=top_margin, wspace=0.22)
+            for ext in ("pdf", "png"):
+                out_path = out_dir / f"val_combined.{ext}"
+                fig.savefig(out_path)
+                print(f"Saved to {out_path}")
+            plt.close(fig)
+
+    default_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    resolved_colors = [
+        args.colors[i] if args.colors and i < len(args.colors)
+        else default_colors[i % len(default_colors)]
+        for i in range(len(labels))
+    ]
 
     metadata = {
         "timestamp": datetime.now().isoformat(),
         "command": " ".join(sys.argv),
         "experiments": [
-            {"label": label, "csv_path": str(p.resolve())}
-            for label, p in zip(labels, csv_paths)
+            {"label": label, "csv_path": str(p.resolve()), "color": color}
+            for label, p, color in zip(labels, csv_paths, resolved_colors)
         ],
         "groups": args.groups,
         "combined_order": args.combined_order,

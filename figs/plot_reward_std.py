@@ -14,9 +14,10 @@ Usage:
     python plot_reward_std.py <val_generations_dir>
     python plot_reward_std.py <single_file.jsonl>
     python plot_reward_std.py <dir> --steps 0 100 200
-    python plot_reward_std.py <dir> --field acc --mode stacked
-    python plot_reward_std.py <dir> --field acc --mode line
+    python plot_reward_std.py <dir> --fields acc --mode stacked
+    python plot_reward_std.py <dir> --fields acc --mode line
     python plot_reward_std.py <dir> --mode heatmap
+    python plot_reward_std.py <dir> --fields score acc --mode line  # side-by-side
 """
 
 import argparse
@@ -60,7 +61,6 @@ def plot_hist(ax, files, field, bins):
 
     ax.set_xlabel(f"Per-prompt {field} std")
     ax.set_ylabel("Count")
-    ax.set_title(f"Distribution of per-prompt {field} std across groups")
     ax.legend()
 
 
@@ -98,37 +98,40 @@ def plot_heatmap(ax, files, field, bins):
     ax.set_yticklabels(steps)
     ax.set_xlabel(f"Per-prompt {field} std")
     ax.set_ylabel("Step")
-    ax.set_title(f"Per-prompt {field} std distribution over training")
     plt.colorbar(im, ax=ax, label="Density")
 
 
-def plot_stacked(ax, files, field):
+def plot_stacked(ax, files, field, n_bins=5):
+    """Stacked bars of per-step group composition.
+
+    Binary field (all values in {0, 1}): bucket by n/k correct.
+    Continuous field (e.g. fraction of test cases passed): bucket the group mean
+    into n_bins equal-width bins over [0, 1].
+    """
     steps = []
-    # For group size k, possible number of correct: 0, 1, ..., k
-    # We detect k from the first file with data
+    all_groups_per_step = []  # list of list-of-group-values (only multi-sample groups)
+
+    is_binary = True
     k = None
-    all_fracs = []  # list of dicts: {n_correct: fraction}
 
     for f in files:
         step = int(f.stem)
         groups = load_groups(f, field)
         if not groups:
             continue
-
-        counts = defaultdict(int)
+        kept = []
         for vals in groups.values():
             if len(vals) < 2:
                 continue
             if k is None:
                 k = len(vals)
-            n_correct = int(round(sum(vals)))
-            counts[n_correct] += 1
-
-        total = sum(counts.values())
-        if total == 0:
+            if is_binary and any(v not in (0, 0.0, 1, 1.0) for v in vals):
+                is_binary = False
+            kept.append(vals)
+        if not kept:
             continue
         steps.append(step)
-        all_fracs.append({nc: counts[nc] / total for nc in counts})
+        all_groups_per_step.append(kept)
 
     if not steps or k is None:
         return
@@ -136,21 +139,48 @@ def plot_stacked(ax, files, field):
     x = np.arange(len(steps))
     width = 0.8
 
-    # Color gradient: red (0/k) -> orange -> yellow -> light green -> green (k/k)
-    colors = plt.cm.RdYlGn(np.linspace(0, 1, k + 1))
+    if is_binary:
+        n_cats = k + 1
+        labels = [f"{nc}/{k} correct" for nc in range(n_cats)]
+        def bucket(vals):
+            return int(round(sum(vals)))
+    else:
+        bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        labels = [f"[{bin_edges[i]:.1f}, {bin_edges[i + 1]:.1f}{']' if i == n_bins - 1 else ')'}"
+                  for i in range(n_bins)]
+        n_cats = n_bins
+        def bucket(vals):
+            m = float(np.mean(vals))
+            # Place m=1.0 in the last bin rather than out of range
+            idx = int(m * n_bins)
+            if idx >= n_bins:
+                idx = n_bins - 1
+            return idx
+
+    all_fracs = []
+    for kept in all_groups_per_step:
+        counts = defaultdict(int)
+        for vals in kept:
+            counts[bucket(vals)] += 1
+        total = sum(counts.values())
+        all_fracs.append({c: counts[c] / total for c in counts})
+
+    colors = plt.cm.RdYlGn(np.linspace(0, 1, n_cats))
 
     bottom = np.zeros(len(steps))
-    for nc in range(k + 1):
-        fracs = np.array([d.get(nc, 0.0) for d in all_fracs])
-        ax.bar(x, fracs, width, bottom=bottom, label=f"{nc}/{k} correct", color=colors[nc])
+    for c in range(n_cats):
+        fracs = np.array([d.get(c, 0.0) for d in all_fracs])
+        ax.bar(x, fracs, width, bottom=bottom, label=labels[c], color=colors[c])
         bottom += fracs
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(steps, rotation=45, ha="right")
+    max_ticks = 8
+    stride = max(1, int(np.ceil(len(steps) / max_ticks)))
+    tick_idx = np.arange(0, len(steps), stride)
+    ax.set_xticks(x[tick_idx])
+    ax.set_xticklabels([steps[i] for i in tick_idx])
     ax.set_xlabel("Step")
     ax.set_ylabel("Fraction of groups")
-    ax.set_title(f"Per-prompt {field} group composition over training")
-    ax.legend(loc="upper right", fontsize=11)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
     ax.set_ylim(0, 1)
 
 
@@ -206,7 +236,6 @@ def plot_line(ax, files, field):
 
     ax.set_xlabel("Step")
     ax.set_ylabel("Fraction of groups")
-    ax.set_title(f"Per-prompt {field} diversity over training")
     ax.set_ylim(0, 1)
 
     lines1, labels1 = ax.get_legend_handles_labels()
@@ -214,11 +243,25 @@ def plot_line(ax, files, field):
     ax.legend(lines1 + lines2, labels1 + labels2, loc="best", frameon=False)
 
 
+def render(ax, files, field, mode, bins):
+    if mode == "hist":
+        plot_hist(ax, files, field, bins)
+    elif mode == "stacked":
+        plot_stacked(ax, files, field)
+    elif mode == "line":
+        plot_line(ax, files, field)
+    else:
+        plot_heatmap(ax, files, field, bins)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="Path to val_generations dir or a single JSONL file")
-    parser.add_argument("--field", type=str, default="score", help="Field to compute std over (default: score)")
+    parser.add_argument("--fields", type=str, nargs="+", default=["score", "acc"],
+                        help="Fields to compute std over (default: score acc). Pass multiple for side-by-side plot.")
     parser.add_argument("--steps", type=int, nargs="*", default=None, help="Only plot specific steps")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Only plot steps <= this value (truncate curves beyond this point)")
     parser.add_argument("--bins", type=int, default=30, help="Number of histogram bins")
     parser.add_argument("--mode", type=str, default="heatmap", choices=["hist", "heatmap", "stacked", "line"],
                         help="Plot mode (default: heatmap)")
@@ -241,49 +284,69 @@ def main():
         step_set = set(args.steps)
         files = [f for f in files if int(f.stem) in step_set]
 
+    if args.max_steps is not None:
+        files = [f for f in files if int(f.stem) <= args.max_steps]
+
     plt.rcParams.update({
-        "font.size": 16,
-        "axes.labelsize": 18,
+        "font.size": 22,
+        "axes.labelsize": 26,
+        "axes.titlesize": 24,
         "axes.linewidth": 1.5,
         "xtick.major.width": 1.5,
         "ytick.major.width": 1.5,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "legend.fontsize": 14,
+        "xtick.labelsize": 20,
+        "ytick.labelsize": 20,
+        "legend.fontsize": 20,
         "figure.dpi": 150,
         "savefig.bbox": "tight",
         "savefig.pad_inches": 0.05,
     })
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    if args.mode == "hist":
-        plot_hist(ax, files, args.field, args.bins)
-    elif args.mode == "stacked":
-        plot_stacked(ax, files, args.field)
-    elif args.mode == "line":
-        plot_line(ax, files, args.field)
-    else:
-        plot_heatmap(ax, files, args.field, args.bins)
-
-    plt.tight_layout()
-
     out_dir = Path(args.output) if args.output else (path if path.is_dir() else path.parent)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for ext in ("pdf", "png"):
-        out_path = out_dir / f"reward_std_{args.field}_{args.mode}.{ext}"
-        fig.savefig(out_path)
-        print(f"Saved to {out_path}")
-    plt.close(fig)
+    # Individual plots, one per field
+    for field in args.fields:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        render(ax, files, field, args.mode, args.bins)
+        plt.tight_layout()
+        for ext in ("pdf", "png"):
+            out_path = out_dir / f"reward_std_{field}_{args.mode}.{ext}"
+            fig.savefig(out_path)
+            print(f"Saved to {out_path}")
+        plt.close(fig)
+
+    # Combined side-by-side when multiple fields
+    if len(args.fields) > 1:
+        combined_rc = {
+            "font.size": 24,
+            "axes.labelsize": 28,
+            "axes.titlesize": 26,
+            "xtick.labelsize": 22,
+            "ytick.labelsize": 22,
+            "legend.fontsize": 22,
+        }
+        with plt.rc_context(combined_rc):
+            fig, axes = plt.subplots(1, len(args.fields), figsize=(10 * len(args.fields), 6))
+            if len(args.fields) == 1:
+                axes = [axes]
+            for ax, field in zip(axes, args.fields):
+                render(ax, files, field, args.mode, args.bins)
+            fig.tight_layout()
+            for ext in ("pdf", "png"):
+                out_path = out_dir / f"reward_std_{args.mode}_combined.{ext}"
+                fig.savefig(out_path)
+                print(f"Saved to {out_path}")
+            plt.close(fig)
 
     metadata = {
         "timestamp": datetime.now().isoformat(),
         "command": " ".join(sys.argv),
         "input_path": str(path.resolve()),
-        "field": args.field,
+        "fields": args.fields,
         "mode": args.mode,
         "steps": [int(f.stem) for f in files],
+        "max_steps": args.max_steps,
         "bins": args.bins,
         "output_dir": str(out_dir.resolve()),
     }
