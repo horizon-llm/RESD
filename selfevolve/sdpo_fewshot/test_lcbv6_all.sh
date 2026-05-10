@@ -5,19 +5,23 @@ set -euo pipefail
 # s3://shopqa-users/kayleexl/models_livecodebench/
 
 # S3_BASE="s3://shopqa-users/kayleexl/models_livecodebench"
-S3_BASE="s3://shopqa-users/kayleexl/final_models/base-model-7b"
+# S3_BASE="s3://shopqa-users/kayleexl/final_models/base-model-7b"
+S3_BASE="s3://shopqa-users/kayleexl/final_models/eval-model-bran-no-don"
 S3_RESULTS="s3://shopqa-users/yuwzhan/kayleexl_models_livecodebench"
 LOCAL_BASE="checkpoints/kayleexl_models_livecodebench"
 
 CHECKPOINTS=(
-    "AdaptThink-7B-delta0.05"
-    "DeepSeek-R1-Distill-Qwen-7B"
-    "L1-Qwen-7B-Exact"
-    "L1-Qwen-7B-Max"
-    "LCR1_7B"
-    "Laser-D-L4096-7B"
-    "Laser-DE-L4096-7B"
-    "deepseek-7b_pen_beta1_theta0.2_490"
+    "const0.01_w0.5_beta1_theta0.1_280"
+    "const5e-3_w0.5_beta1_theta0.2_300"
+    "deepseek-7b_pen_beta1_theta0.05_230"
+    "deepseek-7b_pen_beta1_theta0.1_410"
+    "deepseek-7b_pen_beta1_theta0.2_580"
+    "deepseek-7b_pen_beta1_theta0.3_470"
+    "neg2_penty1_w0.5-0.3_max0.1_beta1_theta0.2_540"
+    "neg_penty1_w0.5-0.2_max0.1_beta1_theta0.2_580"
+    "outcome_pen_0.3_0.7_1.5_340"
+    "pos_w0.5_beta1_theta0.2_340"
+    "pos_w0.5_beta1_theta0.5_700"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

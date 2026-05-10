@@ -262,6 +262,8 @@ def main():
     parser.add_argument("--steps", type=int, nargs="*", default=None, help="Only plot specific steps")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="Only plot steps <= this value (truncate curves beyond this point)")
+    parser.add_argument("--step-stride", type=int, default=1,
+                        help="Keep every N-th step file (e.g. 2 to plot every 8 steps when eval is every 4)")
     parser.add_argument("--bins", type=int, default=30, help="Number of histogram bins")
     parser.add_argument("--mode", type=str, default="heatmap", choices=["hist", "heatmap", "stacked", "line"],
                         help="Plot mode (default: heatmap)")
@@ -286,6 +288,9 @@ def main():
 
     if args.max_steps is not None:
         files = [f for f in files if int(f.stem) <= args.max_steps]
+
+    if args.step_stride > 1:
+        files = files[::args.step_stride]
 
     plt.rcParams.update({
         "font.size": 22,

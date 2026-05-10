@@ -5,11 +5,16 @@ python -m pip install langdetect immutabledict nltk
 
 # ---- Usage ----
 # Test a local checkpoint:
-#   CHECKPOINT_PATH=checkpoints/sdpo_finer/my_exp/global_step_100 bash selfevolve/sdpo_fewshot/test_finer.sh
+#   CHECKPOINT_PATH=checkpoints/sdpo_finer/my_exp/global_step_100 bash selfevolve/sdpo_fewshot/test_ifeval.sh
 #
 # Download from S3 then test:
 #   S3_CHECKPOINT=s3://shopqa-users/yuwzhan/iterative-opd/checkpoints/sdpo_finer/my_exp/global_step_100 \
-#     bash selfevolve/sdpo_fewshot/test_finer.sh
+#     bash selfevolve/sdpo_fewshot/test_ifeval.sh
+#
+# Test the base model (no checkpoint):
+#   CHECKPOINT_PATH=. bash selfevolve/sdpo_fewshot/test_ifeval.sh \
+#     trainer.resume_mode=disable trainer.resume_from_path=null \
+#     trainer.validation_data_dir=base_model_ifeval
 # ---------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +49,7 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:?Please set CHECKPOINT_PATH or S3_CHECKPOINT}
 
 ########################### Data Preprocess ###########################
 
-val_path=selfevolve/sdpo/datasets/ifeval/test.parquet
+val_path=selfevolve/sdpo_fewshot/datasets/ifeval/test.parquet
 
 ########################### Quick Config ###########################
 

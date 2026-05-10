@@ -180,7 +180,7 @@ def main():
         # more when embedded in papers. Bump font sizes to compensate.
         combined_rc = {
             "font.size": 18,
-            "axes.labelsize": 22,
+            "axes.labelsize": 19,
             "xtick.labelsize": 17,
             "ytick.labelsize": 17,
             "legend.fontsize": 15,
@@ -191,10 +191,21 @@ def main():
                 axes = [axes]
             for ax, group_name in zip(axes, combined_groups):
                 plot_group(ax, group_name, all_data, show_legend=False)
-            # Single shared legend across the top
+            # Single shared legend across the top — shrink ncol until it fits
             handles, labels_leg = axes[0].get_legend_handles_labels()
-            max_cols = 4
-            ncol = min(len(handles), max_cols)
+            renderer = fig.canvas.get_renderer()
+            fig_width_px = fig.get_size_inches()[0] * fig.dpi
+            ncol = min(len(handles), 4)
+            while ncol > 1:
+                leg = fig.legend(handles, labels_leg, frameon=False,
+                                 loc="lower center", bbox_to_anchor=(0.5, 0.91),
+                                 ncol=ncol)
+                leg_width_px = leg.get_window_extent(renderer).width
+                if leg_width_px <= fig_width_px:
+                    leg.remove()
+                    break
+                leg.remove()
+                ncol -= 1
             nrows = -(-len(handles) // ncol)  # ceil division
             top_margin = 0.90 - 0.05 * (nrows - 1)
             fig.legend(handles, labels_leg, frameon=False,
