@@ -4,14 +4,11 @@
 # Learning from Rare Success and Rich Feedback via Reflection-Enhanced Self-Distillation (RESD)
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2505.10978">
+  <a href="https://github.com/horizon-llm/RESD/blob/resd/paper.pdf">
     <img src="https://img.shields.io/badge/arXiv-Paper-red?style=flat-square&logo=arxiv" alt="arXiv Paper"></a>
   &nbsp;
-  <a href="https://github.com/langfengQ/verl-agent">
+  <a href="https://github.com/horizon-llm/RESD">
     <img src="https://img.shields.io/badge/GitHub-Project-181717?style=flat-square&logo=github" alt="GitHub Project"></a>
-  &nbsp;
-  <a href="https://huggingface.co/collections/langfeng01/verl-agent-684970e8f51babe2a6d98554">
-    <img src="https://img.shields.io/badge/HuggingFace-Models-yellow?style=flat-square&logo=huggingface" alt="HuggingFace Models"></a>
   &nbsp;
   <a href="https://x.com/langfengq/status/1930848580505620677">
     <img src="https://img.shields.io/badge/Twitter-Channel-000000?style=flat-square&logo=x" alt="X Channel"></a>

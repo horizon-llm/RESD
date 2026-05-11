@@ -25,12 +25,12 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
 
-python selfevolve/resd/prepare_finer_dataset.py \
+python selfevolve/resd/data/format/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
         --num_data $NUM_DATA \
         --output data/finer/train_${NUM_DATA}.parquet
-python selfevolve/resd/prepare_finer_dataset.py \
+python selfevolve/resd/data/format/prepare_finer_dataset.py \
         --task_name finer \
         --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
         --output data/finer/val.parquet

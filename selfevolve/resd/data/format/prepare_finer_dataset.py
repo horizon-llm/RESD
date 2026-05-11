@@ -6,12 +6,12 @@ individual questions, reformats using the GRPO prompt template (with
 verl/utils/dataset/rl_dataset.py.
 
 Usage:
-    python -m selfevolve.resd.prepare_finer_dataset \
+    python -m selfevolve.resd.data.format.prepare_finer_dataset \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
         --output data/finer_train.parquet
 
     # Multiple splits at once:
-    python -m selfevolve.resd.prepare_finer_dataset \
+    python -m selfevolve.resd.data.format.prepare_finer_dataset \
         --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
                selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
         --output data/finer_train.parquet data/finer_val.parquet
