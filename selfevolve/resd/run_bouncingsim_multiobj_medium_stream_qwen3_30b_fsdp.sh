@@ -48,28 +48,14 @@ CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-58368}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
-ENABLE_THINKING=True
 # === distillation feedback ===
 MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-58368}
-ENV_ONLY_WHEN_NO_SOLUTION=${ENV_ONLY_WHEN_NO_SOLUTION:-True} # whether to only use environment feedback when none of the rollouts is successful
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-False} # whether to skip reprompting when the model's own generation is already successful
-remove_thinking_from_demonstration=${remove_thinking_from_demonstration:-False} # whether to remove <think>...</think> tokens from demonstration in the feedback prompt
-include_previous_attempt=${include_previous_attempt:-False} # whether to include previous attempt when feedbacks are used
 # === distillation objective ===
 ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
-remove_thinking_in_loss=${remove_thinking_in_loss:-False} # use this variable to control whether to remove <think>...</think> tokens from loss computation
-distillation_top_p=${distillation_top_p:-null}
-distillation_max_k=${distillation_max_k:-null} # maximum number of tokens to keep when using top-p (memory cap); null means no limit
-distillation_token_selector=${distillation_token_selector:-"student"} # "student": use student's topk/top-p as support; "teacher": use teacher's topk/top-p as support; "union": use the union of student and teacher support
 teacher_prob_min_ratio=${teacher_prob_min_ratio:-0.2} # Clamp teacher prob to be at least this proportion of student prob; null disables
 teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
-position_weighting_enabled=${position_weighting_enabled:-False} # whether to weight distillation loss by token position in response
-position_weighting_beta=${position_weighting_beta:-1.0} # strength of position weighting; only relevant if position_weighting_enabled is True
-entropy_diff_filter_ratio=${entropy_diff_filter_ratio:-null} # [deprecated] fraction of tokens to keep per sequence by (teacher_H - student_H); null disables
-entropy_filter_ratio=${entropy_filter_ratio:-null} # fraction of tokens to keep per sequence by entropy criterion; null disables
-entropy_filter_criterion=${entropy_filter_criterion:-"diff"} # criterion: diff, teacher_low, teacher_high, student_high, student_low, ratio
-entropy_gt_filter=${entropy_gt_filter:-False} # whether to apply hard filter where teacher_entropy > student_entropy
 success_rate_weighting=${success_rate_weighting:-False} # whether to weight distillation loss by group success rate
 success_rate_alpha=${success_rate_alpha:-1.0} # exponent for success sample weights: (1-sr)^alpha
 success_rate_beta=${success_rate_beta:-1.0} # exponent for failure sample weights: sr^beta
@@ -91,12 +77,6 @@ use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whethe
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
 cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/resd/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
-use_playbook_in_student_rollout=${use_playbook_in_student_rollout:-False} # whether to inject playbook snapshot into the student prompt during first rollout
-student_playbook_sync_frequency=${student_playbook_sync_frequency:-null} # how often to sync the student playbook snapshot; null defaults to concise_frequency
-student_prompt_file=${student_prompt_file:-null} # path to a .txt file with custom student prompt template; null uses built-in default
-# === teacher ===
-teacher_enabled=${teacher_enabled:-False}
-feedback_on_correct=${feedback_on_correct:-False} # whether to provide teacher feedback even when the model output is already correct
 # === stream trainer ===
 max_updates_per_batch=${max_updates_per_batch:-4}
 min_updates_per_batch=${min_updates_per_batch:-4}
@@ -122,27 +102,13 @@ _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-5
 _add ema     "$EMA_WEIGHT"                 0.05
-_add envonly "$ENV_ONLY_WHEN_NO_SOLUTION"  True
 _add distk   "$DISTILLATION_TOPK"          100
-_add distp   "$distillation_top_p"         null
-_add distmk  "$distillation_max_k"         null
-_add distts  "$distillation_token_selector" student
 _add tpmin   "$teacher_prob_min_ratio"     null
 _add tpmax   "$teacher_prob_max_ratio"     null
-_add pwe     "$position_weighting_enabled" False
-_add pwb     "$position_weighting_beta"    1.0
-_add edfr    "$entropy_diff_filter_ratio"  null
-_add efr     "$entropy_filter_ratio"      null
-_add efc     "$entropy_filter_criterion"  diff
-_add egf     "$entropy_gt_filter"         False
 _add srw     "$success_rate_weighting"   False
 _add sra     "$success_rate_alpha"       1.0
 _add srb     "$success_rate_beta"        1.0
-_add think   "$ENABLE_THINKING"            True
 _add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" False
-_add rmthl   "$remove_thinking_in_loss"    False
-_add rmthd   "$remove_thinking_from_demonstration" False
-_add prevatt "$include_previous_attempt"   False
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -160,11 +126,6 @@ _add usoltp  "$use_solution_in_teacher_prompt" False
 _add rpf     "$(basename "${reflector_prompt_file}" .txt)"    null
 _add cpf     "$(basename "${curator_prompt_file}" .txt)"      null
 _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
-_add sturollpb "$use_playbook_in_student_rollout" False
-_add stusync "$student_playbook_sync_frequency"  null
-_add stupf   "$(basename "${student_prompt_file}" .txt)"   null
-_add teachfb "$teacher_enabled"   False
-_add foc     "$feedback_on_correct"        False
 _add mupb    "$max_updates_per_batch"      4
 _add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
@@ -181,7 +142,7 @@ DATA=(
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
-    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
+    "data.apply_chat_template_kwargs={enable_thinking: True}"
     custom_reward_function.path=selfevolve/resd/feedback/bouncingsim.py
     custom_reward_function.name=compute_score
     +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
@@ -209,21 +170,8 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
-    actor_rollout_ref.actor.self_distillation.environment_feedback_only_without_solution=${ENV_ONLY_WHEN_NO_SOLUTION}
-    actor_rollout_ref.actor.self_distillation.remove_thinking_in_loss=${remove_thinking_in_loss}
-    actor_rollout_ref.actor.self_distillation.remove_thinking_from_demonstration=${remove_thinking_from_demonstration}
-    actor_rollout_ref.actor.self_distillation.distillation_top_p=${distillation_top_p}
-    actor_rollout_ref.actor.self_distillation.distillation_max_k=${distillation_max_k}
-    actor_rollout_ref.actor.self_distillation.distillation_token_selector=${distillation_token_selector}
-    actor_rollout_ref.actor.self_distillation.include_previous_attempt=${include_previous_attempt}
     actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
-    actor_rollout_ref.actor.self_distillation.position_weighting_enabled=${position_weighting_enabled}
-    actor_rollout_ref.actor.self_distillation.position_weighting_beta=${position_weighting_beta}
-    actor_rollout_ref.actor.self_distillation.entropy_diff_filter_ratio=${entropy_diff_filter_ratio}
-    actor_rollout_ref.actor.self_distillation.entropy_filter_ratio=${entropy_filter_ratio}
-    actor_rollout_ref.actor.self_distillation.entropy_filter_criterion=${entropy_filter_criterion}
-    actor_rollout_ref.actor.self_distillation.entropy_gt_filter=${entropy_gt_filter}
     actor_rollout_ref.actor.self_distillation.success_rate_weighting=${success_rate_weighting}
     actor_rollout_ref.actor.self_distillation.success_rate_alpha=${success_rate_alpha}
     actor_rollout_ref.actor.self_distillation.success_rate_beta=${success_rate_beta}
@@ -247,15 +195,10 @@ CONTEXT_UPDATER=(
     actor_rollout_ref.actor.self_distillation.context_updater.reflector_prompt_file=${reflector_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.curator_prompt_file=${curator_prompt_file}
     actor_rollout_ref.actor.self_distillation.context_updater.cu_teacher_prompt_file=${cu_teacher_prompt_file}
-    actor_rollout_ref.actor.self_distillation.context_updater.use_playbook_in_student_rollout=${use_playbook_in_student_rollout}
-    actor_rollout_ref.actor.self_distillation.context_updater.student_playbook_sync_frequency=${student_playbook_sync_frequency}
-    actor_rollout_ref.actor.self_distillation.context_updater.student_prompt_file=${student_prompt_file}
 )
 
 TEACHER=(
-    actor_rollout_ref.actor.self_distillation.teacher.enabled=${teacher_enabled}
     actor_rollout_ref.actor.self_distillation.teacher.server_ip="127.0.0.1"
-    actor_rollout_ref.actor.self_distillation.teacher.feedback_on_correct=${feedback_on_correct}
 )
 
 ROLLOUT=(

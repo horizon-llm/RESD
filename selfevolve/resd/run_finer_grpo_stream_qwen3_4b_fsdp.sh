@@ -53,7 +53,6 @@ CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 FSDP_STRATEGY=${FSDP_STRATEGY:-"fsdp"}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-49152}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
-ENABLE_THINKING=True
 # === stream trainer ===
 max_updates_per_batch=${max_updates_per_batch:-4}
 min_updates_per_batch=${min_updates_per_batch:-4}
@@ -74,7 +73,6 @@ _add maxpl   "$MAX_PROMPT_LENGTH"          49152
 _add maxlen  "$MAX_RESPONSE_LENGTH"        20480
 _add lam     "$LAMBDA"                     0.0
 _add lr      "$LR"                         1e-6
-_add think   "$ENABLE_THINKING"            True
 _add mupb    "$max_updates_per_batch"      4
 _add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
@@ -91,7 +89,7 @@ DATA=(
     data.truncation='error'
     data.filter_overlong_prompts=True
     data.shuffle=False
-    "data.apply_chat_template_kwargs={enable_thinking: ${ENABLE_THINKING}}"
+    "data.apply_chat_template_kwargs={enable_thinking: True}"
     custom_reward_function.path=selfevolve/resd/feedback/finer.py
     custom_reward_function.name=${reward_function}
     +custom_reward_function.reward_kwargs.correctness_feedback=True

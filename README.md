@@ -4,6 +4,9 @@
 # Learning from Rare Success and Rich Feedback via Reflection-Enhanced Self-Distillation (RESD)
 
 <p align="center">
+  <a href="https://yuweizhang.notion.site/resd">
+    <img src="https://img.shields.io/badge/Notion-Blog-000000?style=flat-square&logo=notion" alt="Notion Blog"></a>
+  &nbsp;
   <a href="https://github.com/horizon-llm/RESD/blob/resd/paper.pdf">
     <img src="https://img.shields.io/badge/arXiv-Paper-red?style=flat-square&logo=arxiv" alt="arXiv Paper"></a>
   &nbsp;
