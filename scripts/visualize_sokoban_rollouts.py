@@ -23,7 +23,7 @@ from copy import deepcopy
 import numpy as np
 
 # Import sokoban engine directly to avoid package-level __init__ issues
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "selfevolve" / "sdpo_fewshot" / "feedback" / "reasoning_gym_games"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "selfevolve" / "resd" / "feedback" / "reasoning_gym_games"))
 from sokoban import Game, _get_board_string, _is_solved
 
 # ── ANSI colors ──────────────────────────────────────────────────────────────
