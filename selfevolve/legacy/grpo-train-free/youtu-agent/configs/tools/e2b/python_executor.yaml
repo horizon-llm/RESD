@@ -1,5 +1,0 @@
-name: python_executor
-mode: builtin
-env_mode: e2b
-activated_tools: null
-# config: 

@@ -1,4 +1,0 @@
-dataset: "GAIA_val"
-type: "single"
-question_field: "Question"
-gt_field: "Final answer"

@@ -1,3 +1,0 @@
-name: user_interaction
-mode: builtin
-activated_tools: ["ask_user"]
