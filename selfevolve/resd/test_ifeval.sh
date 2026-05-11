@@ -7,10 +7,6 @@ python -m pip install langdetect immutabledict nltk
 # Test a local checkpoint:
 #   CHECKPOINT_PATH=checkpoints/sdpo_finer/my_exp/global_step_100 bash selfevolve/resd/test_ifeval.sh
 #
-# Download from S3 then test:
-#   S3_CHECKPOINT=s3://shopqa-users/yuwzhan/iterative-opd/checkpoints/sdpo_finer/my_exp/global_step_100 \
-#     bash selfevolve/resd/test_ifeval.sh
-#
 # Test the base model (no checkpoint):
 #   CHECKPOINT_PATH=. bash selfevolve/resd/test_ifeval.sh \
 #     trainer.resume_mode=disable trainer.resume_from_path=null \
@@ -31,21 +27,7 @@ ulimit -c 0
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
 
-########################### Download Checkpoint from S3 ###########################
-
-S3_CHECKPOINT="${S3_CHECKPOINT:-}"
-
-if [[ -n "$S3_CHECKPOINT" ]]; then
-    # Derive local path: strip the s3 prefix to get a relative local directory
-    # e.g. s3://shopqa-users/yuwzhan/iterative-opd/checkpoints/... -> checkpoints/...
-    LOCAL_CHECKPOINT_DIR="${S3_CHECKPOINT#*iterative-opd/}"
-    mkdir -p "$LOCAL_CHECKPOINT_DIR"
-    echo "[bootstrap] Syncing ${S3_CHECKPOINT}/ -> ${LOCAL_CHECKPOINT_DIR}/"
-    aws s3 sync "${S3_CHECKPOINT}/" "${LOCAL_CHECKPOINT_DIR}/" --region us-east-1
-    CHECKPOINT_PATH="$LOCAL_CHECKPOINT_DIR"
-fi
-
-CHECKPOINT_PATH="${CHECKPOINT_PATH:?Please set CHECKPOINT_PATH or S3_CHECKPOINT}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:?Please set CHECKPOINT_PATH}"
 
 ########################### Data Preprocess ###########################
 
@@ -97,10 +79,3 @@ exp_name="test_ifeval"
     trainer.resume_from_path=${CHECKPOINT_PATH} \
     trainer.validation_data_dir="${CHECKPOINT_PATH}/val_generations" \
     "$@"
-
-########################### Sync Results to S3 ###########################
-
-if [[ -n "$S3_CHECKPOINT" ]]; then
-    echo "[upload] Syncing val_generations back to S3..."
-    aws s3 sync "${CHECKPOINT_PATH}/val_generations/" "${S3_CHECKPOINT}/val_generations/" --region us-east-1
-fi

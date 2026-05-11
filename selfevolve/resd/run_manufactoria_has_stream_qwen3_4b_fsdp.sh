@@ -24,19 +24,13 @@ wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
 
 CONFIG_NAME="sdpo"
 NUM_DATA=${NUM_DATA:--1}
-USE_HARD_DATA=${USE_HARD_DATA:-False}
 
-if [[ "$USE_HARD_DATA" == "True" ]]; then
-    python selfevolve/resd/preprocess.py --truncate_parquet selfevolve/resd/datasets/manufactoria/train_hard.parquet --num_data $NUM_DATA
-    train_path=selfevolve/resd/datasets/manufactoria/train_hard_${NUM_DATA}.parquet
-else
-    python selfevolve/resd/data/format/manufactoria.py \
-        --train_data_source manufactoria/has_train \
-        --test_data_source manufactoria/has_test \
-        --num_data ${NUM_DATA} \
-        --data_source_suffix "has"
-    train_path=selfevolve/resd/datasets/manufactoria/train_${NUM_DATA}.parquet
-fi
+python selfevolve/resd/data/format/manufactoria.py \
+    --train_data_source manufactoria/has_train \
+    --test_data_source manufactoria/has_test \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "has"
+train_path=selfevolve/resd/datasets/manufactoria/train_${NUM_DATA}.parquet
 
 val_path=selfevolve/resd/datasets/manufactoria/test.parquet
 
@@ -177,42 +171,6 @@ _add mupb    "$max_updates_per_batch"      4
 _add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
 _add sparse  "$sparse_rewards"             False
-
-########################### Sync Results ###########################
-
-nohup bash scripts/sync_checkpoints.sh --verbose >"sync_s3.out" 2>&1 | tee sync_s3.out &
-SYNC_PID=$!
-# Set up trap to kill the sync process on script exit (normal or error)
-trap "echo 'Killing sync process (PID: $SYNC_PID)...'; kill $SYNC_PID 2>/dev/null || true" EXIT
-
-########################### Download Existing Checkpoints ###########################
-
-CHECKPOINT_BASE_S3="s3://shopqa-users/yuwzhan/iterative-opd/checkpoints"
-LOCAL_CHECKPOINT_DIR="checkpoints/${project_name}/${exp_name}"
-S3_CHECKPOINT_PREFIX="${CHECKPOINT_BASE_S3}/${project_name}/${exp_name}"
-MARKER_FILE="latest_checkpointed_iteration.txt"
-mkdir -p "$LOCAL_CHECKPOINT_DIR"
-
-# ---- new: check if the prefix exists / has any objects ----
-SHOULD_SYNC=true
-if ! LS_OUT="$(aws s3 ls "${S3_CHECKPOINT_PREFIX}/" 2>&1)"; then
-    echo "[bootstrap] Can't access ${S3_CHECKPOINT_PREFIX}/ (aws error below); skipping sync"
-    echo "[bootstrap] ${LS_OUT}"
-    SHOULD_SYNC=false
-elif [[ -z "${LS_OUT//[[:space:]]/}" ]]; then
-    echo "[bootstrap] No objects found under ${S3_CHECKPOINT_PREFIX}/ yet; skipping sync"
-    SHOULD_SYNC=false
-fi
-# -----------------------------------------------------------
-
-if [[ "$SHOULD_SYNC" == "true" ]]; then
-    STEP="$(aws s3 cp "${S3_CHECKPOINT_PREFIX}/${MARKER_FILE}" --region us-east-1 - 2>/dev/null | head -n1 | tr -d '\r\n[:space:]')"
-    echo "[bootstrap] Syncing global_step_${STEP}/ from ${S3_CHECKPOINT_PREFIX} -> ${LOCAL_CHECKPOINT_DIR}"
-    aws s3 sync "${S3_CHECKPOINT_PREFIX}/global_step_${STEP}/" "${LOCAL_CHECKPOINT_DIR}/global_step_${STEP}/" --region us-east-1 \
-    || echo "[bootstrap] checkpoint sync failed"
-    aws s3 cp "${S3_CHECKPOINT_PREFIX}/${MARKER_FILE}" "${LOCAL_CHECKPOINT_DIR}/${MARKER_FILE}" --region us-east-1 \
-    || echo "[bootstrap] marker file sync failed"
-fi
 
 ########################### Parameter Arrays ###########################
 
