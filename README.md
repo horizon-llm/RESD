@@ -11,7 +11,7 @@
   <a href="https://github.com/horizon-llm/RESD">
     <img src="https://img.shields.io/badge/GitHub-Project-181717?style=flat-square&logo=github" alt="GitHub Project"></a>
   &nbsp;
-  <a href="https://x.com/langfengq/status/1930848580505620677">
+  <a href="https://x.com/">
     <img src="https://img.shields.io/badge/Twitter-Channel-000000?style=flat-square&logo=x" alt="X Channel"></a>
 </p>
 
