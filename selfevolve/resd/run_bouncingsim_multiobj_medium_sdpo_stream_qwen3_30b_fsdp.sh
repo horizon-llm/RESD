@@ -18,47 +18,41 @@ ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
-wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
-
-########################### Data Preprocess ###########################
-
-CONFIG_NAME="sdpo"
-NUM_DATA=${NUM_DATA:--1}
-
-python selfevolve/resd/data/format/finer.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_train_batched_1000_samples.jsonl \
-        --num_data $NUM_DATA \
-        --output data/finer/train_${NUM_DATA}.parquet
-python selfevolve/resd/data/format/finer.py \
-        --task_name finer \
-        --input selfevolve/ace/data/finer_val_batched_500_samples.jsonl \
-        --output data/finer/val.parquet
-
-train_path=data/finer/train_${NUM_DATA}.parquet
-val_path=data/finer/val.parquet
+wandb login $WANDB_API_KEY
 
 ########################### Quick Config ###########################
 
-TASK=finer
+CONFIG_NAME="sdpo"
+NUM_DATA=${NUM_DATA:-320}
+
+python selfevolve/resd/data/format/bouncingsim.py \
+    --data_source bouncingsim/bouncingsim-MULTIOBJ-medium \
+    --num_data ${NUM_DATA} \
+    --data_source_suffix "multiobj_medium"
+
+train_path=selfevolve/resd/datasets/bouncingsim_multiobj_medium/train_${NUM_DATA}.parquet
+val_path=selfevolve/resd/datasets/bouncingsim_multiobj_medium/test.parquet
+
+########################### Quick Config ###########################
+
+TASK=bouncingsim_multiobj_medium
 export TASK
 
 # === optim ===
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-1}
-LR=${LR:-1e-5}
+LR=${LR:-1e-6}
 LAMBDA=${LAMBDA:-0.0}
 CLIP_ADV_HIGH=${CLIP_ADV_HIGH:-null}
 # === model ===
-EMA_WEIGHT=${EMA_WEIGHT:-0.0001} # 0.0 means no EMA, higher means more weight on updated student
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-49152}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-20480}
+EMA_WEIGHT=${EMA_WEIGHT:-0.01} # 0.0 means no EMA, higher means more weight on updated student
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-58368}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-25600}
 # === distillation feedback ===
-MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-49152}
+MAX_REPROMPT_LENGTH=${MAX_REPROMPT_LENGTH:-58368}
 DONTS_REPROMPT_ON_SELF_SUCCESS=${DONTS_REPROMPT_ON_SELF_SUCCESS:-False} # whether to skip reprompting when the model's own generation is already successful
-success_reward_threshold=${success_reward_threshold:-1.0} # minimum reward to consider a rollout successful (used when DONTS_REPROMPT_ON_SELF_SUCCESS is True)
 # === distillation objective ===
-ALPHA=${ALPHA:-0.5} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
+ALPHA=${ALPHA:-1.0} # 0.5 means JSD, 0.0 means forward KL, 1.0 means reverse KL
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-100}
 teacher_prob_min_ratio=${teacher_prob_min_ratio:-0.2} # Clamp teacher prob to be at least this proportion of student prob; null disables
 teacher_prob_max_ratio=${teacher_prob_max_ratio:-null} # Clamp teacher prob to be at most this proportion of student prob; null disables
@@ -69,8 +63,8 @@ success_rate_beta=${success_rate_beta:-1.0} # exponent for failure sample weight
 use_context_updater=${use_context_updater:-False}
 playbook_mode=${playbook_mode:-"global"} # how to manage playbook: "global" means one shared playbook for all examples; "per_example" means a separate playbook for each example
 concise_frequency=${concise_frequency:-4} # how often to concise the context
-max_bullets=${max_bullets:-120} # maximum number of feedback bullets to include in the context; null means no limit
-concise_method=${concise_method:-"staleness"} # method for concising context, choose from "reset", "prioritized" and "staleness"
+max_bullets=${max_bullets:-null} # maximum number of feedback bullets to include in the context; null means no limit
+concise_method=${concise_method:-"reset"} # method for concising context, choose from "reset" or "prioritized"
 concise_after_curation=${concise_after_curation:-True} # whether to run concise again after curator adds bullets to enforce max_bullets
 tag_correct_samples=${tag_correct_samples:-True} # whether to run success tagging on correct samples to reinforce playbook bullet counts
 use_solution_buffer=${use_solution_buffer:-False} # whether to cache successful trials across steps (useful when batch_size=1)
@@ -82,27 +76,27 @@ use_previous_trial_in_teacher_prompt=${use_previous_trial_in_teacher_prompt:-Tru
 use_solution_in_teacher_prompt=${use_solution_in_teacher_prompt:-False} # whether to include successful solutions in the teacher prompt; requires {solution} placeholder in template
 reflector_prompt_file=${reflector_prompt_file:-null} # path to a .txt file with custom reflector prompt; null uses built-in default
 curator_prompt_file=${curator_prompt_file:-null} # path to a .txt file with custom curator prompt; null uses built-in default
-cu_teacher_prompt_file=${cu_teacher_prompt_file:-null} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
+cu_teacher_prompt_file=${cu_teacher_prompt_file:-"selfevolve/resd/context_updater/prompts/bouncingsim_generator_v1.txt"} # path to a .txt file with custom context-updater teacher prompt; null uses built-in default
 # === stream trainer ===
 max_updates_per_batch=${max_updates_per_batch:-4}
 min_updates_per_batch=${min_updates_per_batch:-4}
 early_stop_improvement_threshold=${early_stop_improvement_threshold:-0.0}
+# === reward function ===
+sparse_rewards=${sparse_rewards:-True} # whether to only provide rewards on the final answer (i.e., after all test cases) instead of per test case
 
-reward_function=${reward_function:-"compute_score_count"} # which reward function to use for distillation feedback; must be a function defined in selfevolve/resd/feedback/finer.py
-
-project_name='sdpo_stream_finer'
+project_name='sdpo_stream_bouncingsim'
 
 # Build exp_name: only include non-default args to keep the name short.
 # Usage: _add <tag> <value> [<default>]
 #   If value != default (or no default given), appends _<tag><value> to exp_name.
 _add() { local tag=$1 val=$2 def=${3:-}; [[ -n "$def" && "$val" == "$def" ]] || exp_name+="_${tag}${val}"; }
 
-exp_name="qwen3_4b_fsdp"
+exp_name="qwen3_30b_fsdp"
 _add ndata   "$NUM_DATA"
 _add trbs    "$TRAIN_BATCH_SIZE"           32
 _add rbs     "$ROLLOUT_BATCH_SIZE"         8
 _add maxpl   "$MAX_PROMPT_LENGTH"          4096
-_add maxlen  "$MAX_RESPONSE_LENGTH"        12288
+_add maxlen  "$MAX_RESPONSE_LENGTH"        20480
 _add maxrp   "$MAX_REPROMPT_LENGTH"        24576
 _add alpha   "$ALPHA"                      0.5
 _add lam     "$LAMBDA"                     0.0
@@ -114,8 +108,7 @@ _add tpmax   "$teacher_prob_max_ratio"     null
 _add srw     "$success_rate_weighting"   False
 _add sra     "$success_rate_alpha"       1.0
 _add srb     "$success_rate_beta"        1.0
-_add sct      "$success_reward_threshold"  1.0
-_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" True
+_add dontrep "$DONTS_REPROMPT_ON_SELF_SUCCESS" False
 _add ctxupd  "$use_context_updater"        False
 _add pbmode  "$playbook_mode"              global
 _add cfreq   "$concise_frequency"          4
@@ -136,7 +129,7 @@ _add ctpf    "$(basename "${cu_teacher_prompt_file}" .txt)"   null
 _add mupb    "$max_updates_per_batch"      4
 _add minupb  "$min_updates_per_batch"      4
 _add esith   "$early_stop_improvement_threshold" 0.0
-_add rf      "$reward_function"           compute_score_count
+_add sparse  "$sparse_rewards"             False
 
 ########################### Parameter Arrays ###########################
 
@@ -150,13 +143,13 @@ DATA=(
     data.filter_overlong_prompts=True
     data.shuffle=False
     "data.apply_chat_template_kwargs={enable_thinking: True}"
-    custom_reward_function.path=selfevolve/resd/feedback/finer.py
-    custom_reward_function.name=${reward_function}
-    +custom_reward_function.reward_kwargs.correctness_feedback=True
+    custom_reward_function.path=selfevolve/resd/feedback/bouncingsim.py
+    custom_reward_function.name=compute_score
+    +custom_reward_function.reward_kwargs.sparse_rewards=${sparse_rewards}
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Thinking-2507
+    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Thinking-2507
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
 
@@ -177,7 +170,6 @@ DISTILLATION=(
     actor_rollout_ref.actor.self_distillation.alpha=$ALPHA
     actor_rollout_ref.actor.self_distillation.teacher_update_rate=$EMA_WEIGHT
     actor_rollout_ref.actor.self_distillation.max_reprompt_len=${MAX_REPROMPT_LENGTH}
-    actor_rollout_ref.actor.self_distillation.success_reward_threshold=${success_reward_threshold}
     actor_rollout_ref.actor.self_distillation.teacher_prob_min_ratio=${teacher_prob_min_ratio}
     actor_rollout_ref.actor.self_distillation.teacher_prob_max_ratio=${teacher_prob_max_ratio}
     actor_rollout_ref.actor.self_distillation.success_rate_weighting=${success_rate_weighting}
@@ -216,7 +208,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.n=4
     actor_rollout_ref.rollout.tensor_model_parallel_size=4
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.55
     actor_rollout_ref.rollout.max_model_len=83968
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.temperature=1.0
@@ -244,10 +236,10 @@ TRAINER=(
     trainer.project_name=${project_name}
     trainer.experiment_name=${exp_name}
     trainer.n_gpus_per_node=8
-    trainer.nnodes=1
+    trainer.nnodes=2
     trainer.max_actor_ckpt_to_keep=1
-    trainer.save_freq=2
-    trainer.test_freq=2
+    trainer.save_freq=1
+    trainer.test_freq=1
     trainer.forget_eval.eval_freq=0
     trainer.val_before_train=True
     trainer.rollout_data_dir="checkpoints/${project_name}/${exp_name}/rollouts"

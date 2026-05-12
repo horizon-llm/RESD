@@ -33,35 +33,18 @@ Different from original `SDPO`, `RESD` maintains two persistent contexts: **a pl
 # Table of Contents
 
 - [Key Features](#key-features)
-- [Results](#results)  
-- [Installation](#installation)  
-  - [Install veRL](#install-verl)  
-  - [Install Supported Environments](#install-supported-environments)  
-    - [1. ALFWorld](#1-alfworld)  
-    - [2. WebShop](#2-webshop)  
-    - [3. Sokoban](#3-sokoban)  
-    - [4. Gym Cards](#4-gym-cards)  
-    - [5. AppWorld (Experimental)](#5-appworld-experimental)  
-- [Run Examples](#run-examples)  
-  - [RL Training](#rl-training)  
-    - [1. GiGPO](#1-gigpo)  
-    - [2. GRPO](#2-grpo)  
-    - [3. PPO](#3-ppo)  
-    - [4. RLOO](#4-rloo)  
-    - [5. DAPO](#5-dapo)  
-    - [6. GiGPO (dynamic)](#6-gigpo-dynamic)
-  - [Qwen3](#qwen3)
-  - [LoRA](#lora)
-  - [Prompt-based Agent with GPT-4o](#prompt-based-agent-with-gpt-4o)
-- [Tips](#tips)
-  - [1. Customize Memory Module](#1-customize-memory-module)
-  - [2. Data Preparation](#2-data-preparation)
-  - [3. Customize Your Own Prompts](#3-customize-your-own-prompts)
-  - [4. Add New Environments](#4-add-new-environments)
-- [Contributing](#contributing)
+- [Datasets](#datasets)
+- [Results](#results)
+- [Installation](#installation)
+  - [Install via conda](#install-via-conda)
+  - [Docker Environment](#docker-environment)
+- [Run Examples](#run-examples)
+  - [SDPO](#sdpo)
+  - [GRPO](#grpo)
+  - [RESD (Ours)](#resd-ours)
+- [Run Logs](#run-logs)
 - [Acknowledgement](#acknowledgement)
 - [Citation](#citation)
-- [Star History](#star-history)
 
 # Key Features
 
@@ -80,6 +63,21 @@ Different from original `SDPO`, `RESD` maintains two persistent contexts: **a pl
 - **Customize Feedback Format**
 
   `RESD` allows to customize the teacher prompt structure. Checkout `selfevolve/resd/context_updater/prompts`.
+
+# Datasets
+
+We evaluate on four tasks spanning program synthesis, physical reasoning, and financial NER. All tasks provide rich execution feedback (e.g., per-test-case pass/fail) despite using sparse binary rewards.
+
+| Task | Source | Train | Test | Description |
+|------|--------|------:|-----:|-------------|
+| Manufactoria-Has | [RL-Grok](https://github.com/sunblaze-ucb/rl-grok-recipe) | 742 | 132 | Write DSL programs to check input tape patterns |
+| BouncingSim-Easy | [RL-Grok](https://github.com/sunblaze-ucb/rl-grok-recipe) | 640 | 100 | Simulate 2-D multi-object bouncing dynamics (easy) |
+| BouncingSim-Medium | [RL-Grok](https://github.com/sunblaze-ucb/rl-grok-recipe) | 320 | 100 | Simulate 2-D multi-object bouncing dynamics (medium) |
+| FiNER | [ACE](https://github.com/ace-agent/ace) | 1000 | 500 | Tag financial named entities in SEC filings |
+
+**Key characteristics:**
+- **RL-Grok tasks** (Manufactoria, BouncingSim): Near-zero initial success rates with per-test-case pass/fail feedback. A natural testbed for learning from failure feedback, requiring the model to synthesize executable programs from scratch.
+- **FiNER**: Higher initial success rate with per-entity correctness feedback. Assesses whether RESD benefits regimes where successful demonstrations are more accessible.
 
 # Results
 > ⚠️ Note: There might be variations of performance between runs due to rollout quality.
@@ -111,93 +109,71 @@ docker run --gpus all --shm-size=64g --rm -it --net=host \
 ```
 
 # Run Examples
+We provide out-of-the-box scripts in the ['RESD/'](selfevolve/resd) directory for training with different settings.
+
+Before running, set your Weights & Biases API key:
+```bash
+export WANDB_API_KEY=<your-wandb-api-key>
+```
+
 ## SDPO
+```bash
+bash selfevolve/resd/run_manufactoria_has_sdpo_stream_qwen3_4b_fsdp.sh # Manufactoria-Has
+```
+```bash
+bash selfevolve/resd/run_finer_sdpo_stream_qwen3_4b_fsdp.sh # FiNER
+```
+```bash
+bash selfevolve/resd/run_bouncingsim_multiobj_easy_sdpo_stream_qwen3_4b_fsdp.sh # BouncingSim-Easy
+```
+```bash
+bash selfevolve/resd/run_bouncingsim_multiobj_medium_sdpo_stream_qwen3_30b_fsdp.sh # BouncingSim-Medium
+```
 
 ## GRPO
-
-## RESD
-We provide out-of-the-box scripts in the ["examples/"](./examples/) directory for training agents in different environments.
-
-Here are some examples:
-### 1. GiGPO
-GiGPO is our novel algorithm designed to support fine-grained credit assignment in long-horizon LLM agent training. It introduces a two-level grouping mechanism:
-- Episode-level groups capture overall task success via total returns (like GRPO).
-- Step-level groups gather repeated states across trajectories to compute relative advantages for individual actions.
-
-GiGPO is fully critic-free, maintains the same GPU memory footprint and LLM rollout cost as GRPO, yet achieves significantly better training efficiency and performance.
-
 ```bash
-bash examples/gigpo_trainer/run_alfworld.sh # ALFWorld
+bash selfevolve/resd/run_manufactoria_has_grpo_stream_qwen3_4b_fsdp.sh # Manufactoria-Has
 ```
 ```bash
-bash examples/gigpo_trainer/run_webshop.sh # WebShop
+bash selfevolve/resd/run_finer_grpo_stream_qwen3_4b_fsdp.sh # FiNER
 ```
 ```bash
-bash examples/gigpo_trainer/run_sokoban.sh # Sokoban
-```
-### 2. GRPO
-GRPO is a critic-free algorithm that estimates relative advantages based on a group of full episode trajectories.
-```bash
-bash examples/grpo_trainer/run_alfworld.sh # ALFWorld
+bash selfevolve/resd/run_bouncingsim_multiobj_easy_grpo_stream_qwen3_4b_fsdp.sh # BouncingSim-Easy
 ```
 ```bash
-bash examples/grpo_trainer/run_webshop.sh # WebShop
-```
-### 3. PPO
-PPO is a classic actor-critic algorithm that updates the policy using a clipped objective to ensure stable learning. It requires a separate value network (critic) to estimate state values.
-```bash
-bash examples/ppo_trainer/run_alfworld.sh # ALFWorld
-```
-```bash
-bash examples/ppo_trainer/run_webshop.sh # WebShop
-```
-### 4. RLOO
-For RLOO, we use a leave-one-out estimate and the PPO-clip update (instead of the REINFORCE update), making it closer to [LOOP](https://arxiv.org/abs/2502.01600).
-```bash
-bash examples/rloo_trainer/run_alfworld.sh # ALFWorld
-```
-```bash
-bash examples/rloo_trainer/run_webshop.sh # WebShop
-```
-### 5. DAPO
-DAPO enhances GRPO with techniques like dynamic sampling and clip-higher.
-```bash
-bash examples/dapo_trainer/run_alfworld.sh # ALFWorld
-```
-```bash
-bash examples/dapo_trainer/run_webshop.sh # WebShop
-```
-### 6. GiGPO (dynamic)
-GiGPO uses dynamic sampling and clip-higher from DAPO
-```bash
-bash examples/gigpo_dynamic_trainer/run_alfworld.sh # ALFWorld
-```
-```bash
-bash examples/gigpo_dynamic_trainer/run_webshop.sh # WebShop
-```
-## Qwen3
-```bash
-bash examples/gigpo_trainer/run_webshop_qwen3.sh
+bash selfevolve/resd/run_bouncingsim_multiobj_medium_grpo_stream_qwen3_30b_fsdp.sh # BouncingSim-Medium
 ```
 
-## LoRA
+## RESD (Ours)
 ```bash
-bash examples/gigpo_trainer/run_alfworld_lora.sh
+bash selfevolve/resd/run_manufactoria_has_resd_stream_qwen3_4b_fsdp.sh # Manufactoria-Has
+```
+```bash
+bash selfevolve/resd/run_finer_resd_stream_qwen3_4b_fsdp.sh # FiNER
+```
+```bash
+bash selfevolve/resd/run_bouncingsim_multiobj_easy_resd_stream_qwen3_4b_fsdp.sh # BouncingSim-Easy
+```
+```bash
+bash selfevolve/resd/run_bouncingsim_multiobj_medium_resd_stream_qwen3_30b_fsdp.sh # BouncingSim-Medium
 ```
 
-## Prompt-based Agent with GPT-4o
-We also provide a prompt-based GPT-4o agent.
-```bash
-bash examples/prompt_agent/run_gpt4o_agent.sh
-```
+# Run Logs
+
+| Dataset | W&B |
+|---------|-----|
+| Manufactoria-Has | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?style=flat-square&logo=wandb)](https://api.wandb.ai/links/yuweiz/ff11gsyh) |
+| BouncingSim-Easy | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?style=flat-square&logo=wandb)](https://api.wandb.ai/links/yuweiz/ycdeyjra) |
+| BouncingSim-Medium | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?style=flat-square&logo=wandb)](https://api.wandb.ai/links/yuweiz/y6s1xz5g) |
+| FiNER | [![wandb](https://img.shields.io/badge/W%26B-view-FFBE00?style=flat-square&logo=wandb)](https://api.wandb.ai/links/yuweiz/6yd1a5k4) |
 
 # Acknowledgement
 
 We gratefully acknowledge the contributions of the [veRL](https://github.com/volcengine/verl) team for providing a solid RL infrastructure.
 
-Special thanks to the [RAGEN](https://github.com/RAGEN-AI/RAGEN) project for their codebase, which inspired early design choices during the development of `verl-agent`.
+Special thanks to the [SDPO](https://github.com/lasgroup/SDPO)  and [ACE](https://github.com/ace-agent/ace) project for their codebase, which inspired early design choices during the development of `RESD`.
 
-We also thank the developers of [ALFWorld](https://github.com/alfworld/alfworld), [Sokoban](https://github.com/mpSchrader/gym-sokoban), [Gym Cards](https://github.com/RL4VLM/RL4VLM/tree/main/gym-cards), [WebShop](https://github.com/princeton-nlp/WebShop), and [AppWorld](https://github.com/stonybrooknlp/appworld) for providing high-quality interactive environments used in this project.
+We also thank the developers of [RL-Grok](https://github.com/sunblaze-ucb/rl-grok-recipe) for providing the data source.
 
 # Citation
 

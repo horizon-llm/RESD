@@ -18,7 +18,7 @@ ulimit -c 0
 
 export PATH="$CONDA_PREFIX/bin:$PATH"
 PYTHON="$CONDA_PREFIX/bin/python"
-wandb login cde3bf4dce4d89d49519e73eabf0196c798f8ee8
+wandb login $WANDB_API_KEY
 
 ########################### Data Preprocess ###########################
 
