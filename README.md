@@ -105,7 +105,7 @@ conda env create -f environment.yml
 ```
 docker run --gpus all --shm-size=64g --rm -it --net=host \
  --entrypoint /usr/bin/bash \
- brandonzyw/resd:latest
+ brandonzyw/resd:v2
 ```
 
 # Run Examples
