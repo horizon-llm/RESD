@@ -5,7 +5,7 @@
   <a href="https://yuweizhang.notion.site/resd">
     <img src="https://img.shields.io/badge/Notion-Blog-000000?style=flat-square&logo=notion" alt="Notion Blog"></a>
   &nbsp;
-  <a href="https://github.com/horizon-llm/RESD/blob/main/paper.pdf">
+  <a href="https://arxiv.org/abs/2605.12741">
     <img src="https://img.shields.io/badge/arXiv-Paper-red?style=flat-square&logo=arxiv" alt="arXiv Paper"></a>
   &nbsp;
   <a href="https://github.com/horizon-llm/RESD">
@@ -180,13 +180,14 @@ We also thank the developers of [RL-Grok](https://github.com/sunblaze-ucb/rl-gro
 If you find `RESD` useful in your research or applications, we would appreciate it if you could cite our work:
 
 ```
-@misc{zhang2026resd,
-  title = {Learning from Rare Success and Rich Feedback via Reflection-Enhanced Self-Distillation},
-  url = {https://yuweizhang.notion.site/resd},
-  author = {Zhang, Yuwei and Li, Sha and Yu, Changlong and Lu, Qin and Jin, Shuowei and Dong, Chengyu and Liu, Haoran and Ilgee, Hong and Li, Xintong and Shi, Zhenyu and Yin, Bing and Shang, Jingbo},
-  journal = {Yuwei Zhang's Notion},
-  year = {2026},
-  month = may,
+@misc{zhang2026learningraresuccessrich,
+      title={Learning with Rare Success but Rich Feedback via Reflection-Enhanced Self-Distillation}, 
+      author={Yuwei Zhang and Sha Li and Changlong Yu and Qin Lu and Shuowei Jin and Chengyu Dong and Haoran Liu and Ilgee Hong and Xintong Li and Zhenyu Shi and Bing Yin and Jingbo Shang},
+      year={2026},
+      eprint={2605.12741},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.12741}, 
 }
 ```
 
